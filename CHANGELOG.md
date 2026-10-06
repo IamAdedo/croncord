@@ -1,8 +1,82 @@
 # Changelog
 
-All notable changes to the **AttendanceBot** project are documented in this file.
+All notable changes to the **Croncord** project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+---
+
+## [4.0.0] - 2026-10-06
+
+### Changed — Project renamed AttendanceBot → Croncord (no functionality changes)
+- **📦 Package identity:** `package.json` name `attendanceBot` → `croncord`; primary global command is now **`croncord`** (`bin` also keeps legacy aliases `l2e`, `lazyruna`, `lazy-runa`, `attenda`, `attendancebot`).
+- **⚙️ PM2 services renamed:** `attendanceBot-daemon` → **`croncord-daemon`**, `attendanceBot-web` → **`croncord-web`** (`ecosystem.config.js`, install/uninstall scripts, npm scripts, `service status|logs` engine commands).
+- **🖥️ Display strings:** CLI banners, help, status, installer output, server logs, webhook embed footers, dashboard title/header/footer/guide, download filenames (`croncord-*`), and web-terminal prompts now say Croncord.
+- **💾 Browser storage keys renamed** (`croncord_*`) with one-time lazy migration from `attendancebot*` keys — theme, notifications, targets, backups, terminal skin, and command history survive the upgrade.
+- **📁 Runtime files:** server pidfile is now `.croncord-server.pid` (the CLI stop command still honors a legacy `.server.pid` left by pre-4.0 installs); Termux boot script is now `start-croncord.sh` (installer removes the legacy one; uninstaller removes both).
+- **📚 Docs & metadata:** README rebranded (`# Croncord`, new clone URL `iamadedo/croncord`), `metadata.json`, `retype.yml`, deploy workflow, `.env.example` header.
+- **🔖 Version bumped `3.9.1` → `4.0.0`** (package rename + CLI/service renames are breaking) — propagates automatically via `src/version.js`.
+
+### Compatibility (what stays working)
+- `config.json`, `attendance_history.json`, `backups/`, export/import payloads: **unchanged formats** — existing data keeps working; the schema validator accepts old exports.
+- Running `service:install` on an upgraded machine **removes legacy `attendanceBot-*` PM2 processes first**, so no duplicate daemon/web processes.
+- Old global aliases keep launching the CLI; re-run `npm link` (or accept the CLI exit offer) to also gain the `croncord` command. If you linked 3.9.x globally, refresh with `npm unlink -g attendanceBot && npm link`.
+
+---
+
+## [3.9.1] - 2026-10-06
+
+### Added
+- **🌐 Global CLI Aliases (launch from anywhere):**
+  - `package.json` `bin` now registers five commands — `l2e`, `lazyruna`, `lazy-runa`, `attenda`, `attendancebot` — all launching `bin/cli.js` (verified working from an unrelated directory; config always resolves to the install folder).
+  - New exit-time `offerGlobalLink()` prompt in the CLI (next to the daemon-install offer): detects which aliases already resolve on `PATH` and runs `npm link` on accept, with elevated-rights guidance when linking is blocked.
+- **🔄 Web Dashboard Autostart on Boot:**
+  - New `ecosystem.config.js` declaring both PM2 apps: `attendanceBot-daemon` (`src/bot.js`) and `attendanceBot-web` (`server.js`, pinned to port 3271).
+  - `bin/install-service.js` now registers **both** services and persists them (`pm2 save`); `bin/uninstall-service.js` removes both.
+  - Platform-aware reboot instructions in the installer (Windows: `pm2-windows-startup`, macOS: `launchd`, Linux: `systemd`, Termux: Termux:Boot `pm2 resurrect` covers both).
+  - New scripts: `service:web:status`, `service:web:logs`, `service:web:restart`; `service:status` now shows all services.
+
+### Changed
+- **🔖 Version bumped `3.9.0` → `3.9.1`** per versioning policy.
+- PM2 service menu labels updated (daemon + web); `.gitignore` now covers `backups/` (snapshots contain the Discord token) and `.server.pid`.
+
+---
+
+## [3.9.0] - 2026-10-06
+
+### Added
+- **🔁 V1 Feature Restoration (CLI wizard parity):**
+  - Restored `isValidTime` validation with re-prompt loops on every time, weekday, and one-time-date prompt — typos can no longer create broken crons.
+  - Restored setup-time `configureGlobalWebhook` with live `testWebhook` delivery check before saving.
+  - Restored Multi-Time / Multi-Day batch builder (`promptScheduleBatch`) as builder mode `[2]` in both server wizards, extended with per-slot message/reaction choice.
+  - Restored `offerServiceInstall` auto-install prompt on CLI exit when active schedules exist.
+  - Added `detectEnvironment()` OS/runtime detection (Windows, macOS, Linux desktop/tmux/headless, Termux, Docker) shown on startup with platform-specific guidance.
+- **⚠️ Server-Side Conflict Detection:**
+  - New shared `src/scheduleConflicts.js` module (5-minute same-channel clash analysis).
+  - New `schedule conflicts <server>` CLI command, `GET /api/servers/:serverId/conflicts` endpoint, and automatic warnings on `schedule list` / `schedule add` and dashboard schedule mutations.
+- **🔮 Upcoming-Runs Preview:**
+  - New `src/upcoming.js` timeline computation backed by the `cron-parser` dependency.
+  - New `upcoming [count]` CLI command, `GET /api/schedules/upcoming` endpoint, and dashboard Upcoming Runs widget (holiday dates excluded, quiet-hour hits flagged).
+- **📸 Auto-Backup Restore Points:**
+  - New `src/configBackups.js`: timestamped snapshot in `backups/` before every real change (newest 20 kept, unchanged writes skipped).
+  - New `backups` / `restore <file>` CLI commands, `GET /api/config/backups` + `POST /api/config/restore` endpoints, and dashboard Restore buttons.
+- **💬 Message Templates & Pools:**
+  - New `src/messageTemplates.js`: `{date}`, `{time}`, `{day}`, `{server}`, `{channel}` variables resolved at send time; per-schedule `messagePool` random pick per run (exact sent text recorded in history).
+  - Wizard variants step, `schedule pool` CLI command, dashboard schedule-editor field, and schema-validator support.
+- **🏖️ Holidays & Quiet Hours:**
+  - New `src/suppression.js` skip rules: global named holidays (`holiday add/list/remove`) with per-server `ignoreHolidays` opt-out, plus global/per-server quiet windows (`quiet` command).
+  - Suppressed firings record neutral `SKIPPED` history (excluded from success rates and health failures); one-time schedules on holidays marked skipped; upcoming preview accounts for both.
+  - Dashboard Holidays manager, quiet-hours controls, and per-server holiday toggle.
+- **🩹 Self-Healing Daemon:**
+  - `daemonManager` auto-reconnects with exponential backoff (5 attempts, fully logged); manual `stop` cancels pending retries; reconnect state exposed in `status` and `/api/status`.
+
+### Changed
+- **🔖 Version bumped `3.8.0` → `3.9.0`** per versioning policy (single source of truth `package.json` → `src/version.js` propagates to badges, API, exports, CLI).
+- **📖 README rewritten:** V1 + V2 merged — V1 ASCII art, structure, and beginner guides kept intact, with full v3.9 feature documentation.
+
+### Fixed
+- One-time schedule builder no longer accepts invalid/past dates (previously fell through to a mislabeled everyday cron).
+- Weekday picker no longer silently defaults to Monday on bad input.
 
 ---
 
