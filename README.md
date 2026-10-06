@@ -1,238 +1,604 @@
-# ⚡ AttendanceBot
+# ⚡ Croncord
+
+A self-hosted Discord message scheduling daemon.
 
 ```text
-██╗     ██████╗ ███████╗
-██║     ╚════██╗██╔════╝
-██║      █████╔╝█████╗
-██║     ██╔═══╝ ██╔══╝
-███████╗███████╗███████╗
-╚══════╝╚══════╝╚══════╝
+  // ██ ██ \\  	  ██╗     ██████╗ ███████╗
+ //  ██ ██  \\    ██║     ╚════██╗██╔════╝
+//   ██ ██   \\	  ██║      █████╔╝█████╗
+\\   ██ ██   //	  ██║     ██╔═══╝ ██╔══╝
+ \\  ██ ██  // 	  ███████╗███████╗███████╗
+  \\ ██ ██ //  	  ╚══════╝╚══════╝╚══════╝
 ```
 
-> **AttendanceBot v3.2.0 by IamAdedo, dlazyHNTR**  
-> *Automated multi-server Discord daily attendance background daemon with an interactive Web Management Dashboard, drag-and-drop schedule prioritization, real-time check-in telemetry, rate-limit conflict warnings, and a complete CLI suite.*
+> **Croncord v4.0.0 by IamAdedo, dlazyHNTR** \
+> *Automatically send attendance messages to Discord servers on schedule. Set it once, let it run in the background forever — now with a Web Management Dashboard, upcoming-runs preview, holidays & quiet hours, message pools, auto-restore points, and a self-healing daemon.*
 
 ---
 
 ## 📌 Badges & Metadata
 
-- **Current Version:** `v3.7.0`
-- **Dashboard Port:** `http://localhost:3271` (Primary Base Port)
+- **Current Version:** `v3.9.0`
+- **Dashboard Port:** `http://localhost:3271` (Primary Base Port — never touches port 3000)
 - **Node.js Requirement:** `18.0.0` or higher
 - **License:** MIT
 - **Supported Platforms:** Windows, macOS, Linux, and Android (Termux — No Root Needed)
+- **Interfaces:** Interactive Terminal CLI · Web Management Dashboard · 24/7 Background Daemon
 
 ---
 
 ## 🤔 What Does This Do?
 
-**AttendanceBot** automates daily attendance and scheduled check-ins across multiple Discord servers and channels. It supports sending custom text messages (e.g., `"Present"`, multi-line updates) or reacting with emojis to messages at defined schedules.
+**Croncord** automatically sends messages (like "Present" or "Good morning") — or emoji reactions — to Discord channels at times you choose. Perfect for:
 
-You can manage the bot via:
-1. **Interactive Web Dashboard** on `http://localhost:3271` with real-time statistics, drag-and-drop reordering, one-click manual test runs, and rate-limit conflict detection.
-2. **Terminal CLI & Remote Controller** (`npm run cli` / `node bin/cli.js`) for rapid headless administration.
-3. **Background Daemon** running 24/7 with auto-restart on system boot.
+- Daily attendance in Work/Study Discord servers
+- Automated check-ins for games or communities
+- Scheduled greetings or reminders
+
+Once set up, it runs invisibly in the background on your computer. You can add multiple servers and multiple schedules for each server.
+
+You can manage the bot three ways:
+
+1. **Interactive Terminal CLI** (`npm run cli`) — guided wizards, duplicate detection, schedule batch builder, daemon controls, and a full headless command suite.
+2. **Web Management Dashboard** (`npm start` → `http://localhost:3271`) — server cards, drag-and-drop schedule prioritization, one-click test runs, upcoming-runs timeline, analytics, and live logs.
+3. **Background Daemon** — runs 24/7 with PM2 (auto-start on boot, wake-lock on Termux) and now heals itself after Discord disconnects.
 
 ---
 
 ## ✨ Features
 
-- 🌐 **Modern Web Management Dashboard** — Responsive Discord dark/light interface on active port 3271 for managing servers, schedules, credentials, and live daemon controls.
-- ⚠️ **Rate-Limit Conflict Detection & Visual Warning Icons** *(New in v3.1)* — Prominent visual warning icons on the server profile card (avatar badge, header tag, channel row, and schedule rows) when multiple routines trigger within a 5-minute window in the same channel, preventing potential Discord rate-limiting.
-- 🔀 **Drag-and-Drop Schedule Prioritization** — Reorder attendance execution sequences with intuitive drag-and-drop rows, priority indicators (`#1`, `#2`...), and up/down controls.
-- ⏱️ **Time Elapsed Since Last Check-in** — Live check-in clock badge (`fa-regular fa-clock`) on each server profile row and server header calculating exact elapsed time since the last successful attendance check-in.
-- ▶️ **One-Click 'Test Run' Play Button** — Execute immediate manual test runs on any schedule with animated spinner states, instant toast notifications, and live telemetry updates.
-- 💻 **Interactive CLI Suite** — Headless terminal CLI with commands for status, logs, server management, and schedule ordering (`schedule move`, `schedule reorder`).
-- 🏢 **Multi-Server & Multi-Schedule Profiles** — Manage unlimited Discord servers, each with distinct channel targets, frequencies, and payloads.
-- 📅 **Flexible Scheduling Modes** — Everyday, weekdays, weekends, specific repeating weekdays (e.g., every Monday), or a **one-time calendar date** that auto-disables after execution.
-- 💬 **Message OR Reaction Modes** — Dispatch multi-line text messages OR react with custom emojis to channel messages.
-- 🛡️ **Anti-Detection Jitter** — Configurable randomized delay window (1-10+ minutes) to prevent rigid, bot-like repetitive timestamps.
-- 🔔 **Discord Webhook Alerts** — Instant notification embeds dispatched to your personal Discord channel with execution summaries and delivery status.
-- 📊 **30-Day Attendance Analytics** — Interactive visualizations, check-in heatmaps, 30-day success rates, and streak counters.
-- 📜 **Live Activity Logs & CSV Export** — Real-time event streaming with severity filters, search queries, and one-click CSV file export.
-- 💾 **Auto-Save & Configuration Backups** — Automatic profile snapshots and hot JSON configuration export/import with version metadata.
-- 📱 **Android Support (Termux No-Root)** — Native mobile background service with wake lock and Termux:Boot resurrection.
+### Core (V1 classics, fully restored)
+- ✅ **Multiple Servers** — Manage attendance for unlimited Discord servers
+- ✅ **Multiple Schedules** — Set different times for each server (e.g., 9 AM weekdays, 8 PM weekends)
+- ✅ **Flexible Scheduling** — Everyday, weekdays, weekends, a specific repeating weekday (e.g., every Monday), a **one-time calendar date** that auto-disables after it fires, or a **custom 5-part cron**
+- ✅ **Multi-Time / Multi-Day Builder** — Add several times to one day and several days in a single pass
+- ✅ **Guided + Validated Input** — Every time, weekday, and calendar date is re-prompted until valid, so a typo can never create a broken schedule
+- ✅ **Multi-Line Messages** — Attendance messages can span multiple lines (finish with an empty line)
+- ✅ **Anti-Detection Jitter** — Adds random delays (configurable, 10+ minutes recommended) so messages don't post at the exact same second every day
+- ✅ **Message OR Reaction** — Send text messages OR react with emojis to existing messages
+- ✅ **Webhook Alerts** — Get notifications on your phone when attendance posts (verified with a live test *before* saving)
+- ✅ **Background Service** — Runs 24/7 even when you close the terminal or restart your computer — including **no-root Android (Termux)**, with automatic OS detection
+- ✅ **Exit-Time Daemon Offer** — Quitting the CLI with active schedules offers to install & start the background daemon for you
+- ✅ **Easy Setup** — Interactive step-by-step wizard — no coding knowledge needed
+
+### Dashboard & CLI suite (V2)
+- 🌐 **Modern Web Management Dashboard** — Responsive Discord-styled interface for servers, schedules, credentials, and live daemon controls
+- 🔀 **Drag-and-Drop Schedule Prioritization** — Reorder execution sequences with drag handles, priority badges (`#1`, `#2`…), or the CLI (`schedule move`, `schedule reorder`)
+- ▶️ **One-Click Test Runs** — Execute any schedule immediately with spinner states, toast feedback, and live telemetry updates
+- ⏱️ **Time-Since-Last-Check-in** — Live elapsed-time badges on every server card and header
+- 💻 **Interactive CLI Suite + REPL** — Full headless commands plus an in-CLI command console and a web CLI terminal with history and help popover
+- 📦 **Schema-Validated Import/Export** — Strict JSON validation with duplicate detection and merge/replace modes
+- 📊 **30-Day Attendance Analytics** — Interactive charts, check-in heatmaps, success rates, and streak counters
+- 📜 **Live Activity Logs & CSV Export** — Real-time streaming (SSE), severity filters, search, and one-click CSV export
+
+### New in v3.9.0
+- 🆕 **Upcoming-Runs Preview** — `upcoming [count]` command, `/api/schedules/upcoming` endpoint, and a dashboard timeline widget showing the next real fire times across all servers (holidays excluded, quiet-hour hits flagged)
+- 🆕 **Server-Side Conflict Detection** — The 5-minute clash analysis now lives in `src/scheduleConflicts.js`: `schedule conflicts <server>` command, `/api/servers/:id/conflicts` endpoint, and automatic warnings on `schedule list` / `schedule add` and every dashboard schedule mutation
+- 🆕 **Auto-Backup Restore Points** — A timestamped snapshot lands in `backups/` before every real change (last 20 kept); `backups` + `restore <file>` commands, `/api/config/backups` + `/api/config/restore` endpoints, and dashboard restore buttons
+- 🆕 **Message Templates & Pools** — `{date}`, `{time}`, `{day}`, `{server}`, `{channel}` variables resolved at send time, plus per-schedule variant pools with random pick per run (history records exactly what was sent)
+- 🆕 **Holidays & Quiet Hours** — Global named holidays (`holiday add 2026-12-25 "Christmas Day"`) with per-server opt-out, plus daily quiet windows; firings on these are recorded as neutral `SKIPPED` — never failures, never streak-breakers
+- 🆕 **Self-Healing Daemon** — Automatic reconnect with exponential backoff on Discord drops (5 attempts, fully logged); manual `stop` always wins; reconnect state visible in `status` and the dashboard badge
 
 ---
 
-## 🚀 Quick Start Guide
+## 📋 What You Need Before Starting
 
-### Step 1: Clone and Install Dependencies
+1. **Node.js** installed on your computer ([Download here](https://nodejs.org/))
+   - Check if you have it: Open Terminal/PowerShell and type `node -v`
+   - You need version 18 or higher
+
+2. **Your Discord User Token** ([How to get it](#-how-to-get-your-discord-token))
+
+3. **Discord Channel ID** where you want to send attendance ([How to get it](#-how-to-get-a-channel-id))
+
+---
+
+## 🚀 Installation Guide (Step-by-Step)
+
+### Step 1: Download and Install Dependencies
+
+Open your **Terminal** (Mac/Linux) or **PowerShell** (Windows) and run these commands one by one:
+
+##### Navigate to where you want to save the bot (e.g., Desktop)
 
 ```bash
-# Clone the repository
-git clone https://github.com/IamAdedo/attendanceBot.git
+cd Desktop
+```
 
-# Enter the project directory
-cd attendanceBot
+##### Download the project (or download and extract the ZIP from GitHub)
 
-# Install npm dependencies
+> 📱 **On Android?** No root required — see [Android (Termux, no root needed)](#android-termux-no-root-needed) for the mobile setup.
+
+```bash
+git clone https://github.com/iamadedo/croncord.git
+```
+
+##### Enter the project folder
+```bash
+cd croncord
+```
+
+##### Install required packages (this may take 1-2 minutes)
+```bash
 npm install
 ```
 
-### Step 2: Launch the Web Dashboard
+---
+
+### Step 2: Choose Your Interface
+
+**Option A — Interactive Terminal CLI (guided setup):**
+
+```bash
+npm run cli
+```
+
+The CLI detects your environment automatically (Windows / macOS / Linux / Termux / Docker) and, when the dashboard is offline, offers a startup choice:
+
+```
+  [1] Interactive Terminal CLI (manage profiles, schedules & daemon here)
+  [2] Launch Web Dashboard in a New Terminal Window (http://localhost:3271)
+  [3] Dual Mode (Web Server in new window + continue in Terminal CLI)
+```
+
+**Option B — Web Dashboard:**
 
 ```bash
 npm start
-# or: npm run dev
 ```
 
-Open your browser to:
-👉 **`http://localhost:3271`**
+Open your browser to 👉 **`http://localhost:3271`**
 
-From the dashboard you can:
-- Enter your **Discord User Token** securely under **Credentials & Webhook**.
-- Add a **Discord Webhook URL** for real-time mobile push notifications.
-- Create Server Profiles with target **Channel IDs**.
-- Configure, reorder, and test attendance schedules.
-- Start or stop the background daemon with one click.
+From the dashboard you can enter your token, add the webhook URL, create server profiles, build and reorder schedules, run test runs, and start/stop the daemon — all with one click.
 
 ---
 
-## 💻 CLI Operations & Headless Management
+### Step 3: Set Up Your First Server (CLI wizard)
 
-AttendanceBot includes a CLI engine that can run standalone or communicate with the running server:
+In the CLI, choose **[2] Add New Server Profile**. The wizard will ask you:
+
+1. **Discord User Token**: Paste your token (see below for how to get it)
+2. **Global Webhook URL** (first run only): Paste it and the bot sends a **live test notification before saving** — a failed test is never stored
+3. **Profile Name**: A nickname like "Work Server" or "Game Guild"
+4. **Channel ID**: The channel where attendance should post (duplicates are detected — if the name or channel already exists, the wizard offers to add the schedule to that server instead)
+5. **Schedules** — pick a builder mode:
+   - **[1] Guided builder** — one routine at a time with full options: Everyday / Weekdays / Weekends / Specific weekday / One-time date / Custom cron, then Message **or** Reaction mode, then anti-detection jitter
+   - **[2] Multi-Time / Multi-Day batch** — pick repeating weekday(s) **or** one-time date(s), then add **multiple times to the same day**, then **more days** — all in one pass
+   - Times accept `09:00 AM` or `21:30` and are **re-prompted until valid**; dates must be real, `YYYY-MM-DD`, and not in the past
+   - Messages can span **multiple lines** — type each line and press **Enter on an empty line** to finish (leave the first line blank for `Present`)
+   - Variables like `{day}`, `{date}`, `{time}`, `{server}` work anywhere in a message (see [Message Templates & Pools](#-message-templates--pools))
+
+✅ **Your configuration is now saved!** Everything lives in `config.json`, and a timestamped snapshot is stored in `backups/` before every change.
+
+> 💡 When you exit the CLI, Croncord offers to **install and start the background services for you automatically** (daemon + dashboard) **and** to **link the CLI globally** — so you can skip Step 4 below if you accept.
+
+### Launch From Anywhere (Global Aliases)
+
+After linking (offered at CLI exit, or run `npm link` in the project folder once), any of these opens the CLI from **any directory** on the machine:
 
 ```bash
-# Launch interactive terminal CLI
-npm run cli
-
-# Or execute individual commands directly:
-node bin/cli.js status
-node bin/cli.js list
-node bin/cli.js logs 20
+```bash
+croncord  |  l2e  |  lazyruna  |  lazy-runa  |  attenda  |  attendancebot
+```
 ```
 
-### CLI Command Reference
+```bash
+cd ~/anywhere && l2e status     # works — config always resolves to the install folder
+```
+
+Unlink anytime with `npm unlink -g croncord`. (If a command isn't found after linking, make sure your npm global bin dir — `npm config get prefix` — is on `PATH`; on Windows/macOS/Linux the Node installer normally does this.)
+
+---
+
+### Step 4: Start the Background Services
+
+```bash
+npm run service:install
+```
+
+You'll see:
+
+```
+✅ Registered "croncord-daemon" (.../src/bot.js).
+✅ Registered "croncord-web" (.../server.js).
+
+🎉 Croncord services installed and running!
+   • croncord-daemon — Discord background daemon
+   • croncord-web — Web Dashboard at http://localhost:3271
+```
+
+**That's it!** Both services now run in the background. You can close the terminal — the daemon keeps posting (and self-heals Discord drops), and the dashboard stays live on port 3271.
+
+### Autostart on Every Boot
+
+`service:install` persists the process list (`pm2 save`). For boot resurrection, run **once**:
+
+- **Windows** (PowerShell as Administrator): `npm install -g pm2-windows-startup` then `pm2-startup install`
+- **macOS:** `npx pm2 startup launchd`, then run the command it prints
+- **Linux:** `npx pm2 startup systemd`, then run the command it prints
+- **Termux:** install Termux:Boot — the boot script runs `pm2 resurrect`, reviving **both** services, no root needed
+
+Extra commands: `service:web:logs` (dashboard logs), `service:web:restart`, `service:web:status`.
+
+---
+
+## 🔑 How to Get Your Discord Token
+
+> ⚠️ **IMPORTANT**: Your token is like a password to your Discord account. NEVER share it with anyone. If someone gets your token, they can control your Discord account.
+
+1. Open Discord in your desktop browser or app
+2. Press **F12** (or `Ctrl + Shift + I` on Windows/Linux, `Cmd + Option + I` on Mac)
+3. Switch to the **Console** tab
+4. Paste this script and press **Enter**:
+   ```javascript
+   (webpackChunkdiscord_app.push([[''],{},e=>{m=[];for(let c in e.c)m.push(e.c[c])}]),m).find(m=>m?.exports?.default?.getToken!==void 0).exports.default.getToken()
+   ```
+5. Copy the returned token string (without quotes) and paste it into the CLI wizard or the dashboard (**Credentials & Webhook** tab)
+
+---
+
+## 📍 How to Get a Channel ID
+
+1. Open Discord and go to **User Settings** (gear icon)
+2. Go to **Advanced** (under "APP SETTINGS")
+3. Turn on **Developer Mode**
+4. Go back to Discord, **right-click** any channel, and click **Copy Channel ID**
+
+---
+
+## 💻 Managing the Bot
+
+### Check if the Bot is Running
+
+```bash
+npm run service:status
+```
+
+You'll see:
+
+```
+┌─────┬──────────────────────┬─────────┬─────────┬──────────┐
+│ id  │ name                 │ status  │ uptime  │ memory   │
+├─────┼──────────────────────┼─────────┼─────────┼──────────┤
+│ 0   │ croncord-daemon │ online  │ 2h 15m  │ 45.2 MB  │
+└─────┴──────────────────────┴─────────┴─────────┴──────────┘
+```
+
+### View Live Logs (What's Happening Right Now)
+
+```bash
+npm run service:logs
+```
+
+Press **Ctrl + C** to stop watching logs. (The dashboard also streams logs live with filters, search, and CSV export.)
+
+### What's Running Next?
+
+```bash
+node bin/cli.js upcoming 10
+```
+
+Shows the next 10 real fire times across all servers with countdowns — or open the **Upcoming Runs** widget on the dashboard.
+
+### Add More Servers or Edit Schedules
+
+```bash
+npm run cli
+```
+
+Choose **[2]** to add servers (with duplicate check + batch builder), **[3]/[4]** to manage servers and schedule routines (add, toggle, reorder by priority, delete), **[7]** for an instant test run.
+
+### Stop Everything Completely
+
+```bash
+npm run service:uninstall
+```
+
+Removes **both** PM2 services (daemon + web dashboard).
+
+---
+
+## 💻 CLI Command Reference
 
 | Command | Description |
 | :--- | :--- |
-| `status` | Display daemon status, uptime, and configured profile count |
-| `start` / `stop` / `restart` | Control background attendance daemon process |
-| `list` (or `servers`) | List all configured server profiles and their schedules |
+| `status` | Daemon status, uptime, reconnect state, profile counts |
+| `start` / `stop` / `restart` | Control the attendance daemon |
+| `list` (or `servers`) | List all server profiles and schedules |
+| `upcoming [count]` | *(New in v3.9)* Next real fire times across servers (default 10) |
 | `server add <name> <chanId> [cron] [msg]` | Create a new server profile |
-| `server pause <id\|name>` | Temporarily pause attendance check-ins for a server |
-| `server resume <id\|name>` | Resume attendance check-ins for a server |
+| `server edit <id> [name] [chan] [hook]` | Edit server details |
+| `server toggle` / `pause` / `resume <id\|name>` | Pause / resume a server |
 | `server delete <id\|name>` | Remove a server profile |
-| `server enable-all` / `disable-all` | Bulk toggle all server profiles |
-| `schedule list <srvId>` | List all schedules for a specific server |
-| `schedule add <srvId> <cron> [msg]` | Add a schedule to a server |
-| `schedule delete <srvId> <schedId>` | Remove a schedule from a server |
-| `schedule reorder <srvId> <id1,id2,...>` | *(New in v3)* Reorder execution priority sequence by schedule IDs |
-| `schedule move <srvId> <fromPos> <toPos>` | *(New in v3)* Move a schedule from one priority position to another |
-| `trigger <serverId> [scheduleId]` | Manually trigger an immediate test run |
-| `logs [count]` | Display recent activity logs (default: 15) |
-| `token [new_token]` | View or update Discord account user authorization token |
-| `webhook [url]` | View or update global Discord notification webhook |
-| `webhook test [url]` | Dispatch a test embed notification to verify webhook |
-| `backup` | Export current configuration JSON snapshot |
-| `uptime` | View daemon uptime and execution reliability metrics |
+| `server enable-all` / `disable-all` | Bulk toggle all servers |
+| `server ignore-holidays <id> on\|off` | *(New in v3.9)* Opt a server out of holiday skips |
+| `schedule list <srvId>` | List schedules (with conflict warnings) |
+| `schedule add <srvId> <cron> [msg] [label]` | Add a schedule (warns on conflicts) |
+| `schedule toggle` / `pause` / `resume` | Pause / resume a schedule |
+| `schedule delete <srvId> <schedId>` | Remove a schedule |
+| `schedule reorder <srvId> <id1,id2,...>` | Reorder execution priority sequence |
+| `schedule move <srvId> <from> <to>` | Move a schedule between positions |
+| `schedule conflicts <srvId>` | *(New in v3.9)* Show ≤5-minute clash warnings |
+| `schedule pool <srvId> <schedId> [...]` | *(New in v3.9)* View/set message variants |
+| `trigger <serverId> [scheduleId]` | Immediate test run |
+| `quiet [start end \| clear]` | *(New in v3.9)* View/set/clear quiet hours |
+| `holiday list \| add <date> [name] \| remove <date>` | *(New in v3.9)* Manage named holidays |
+| `backups` / `restore <file>` | *(New in v3.9)* List / restore config snapshots |
+| `logs [count]` / `logs clear` | Activity logs |
+| `token [new_token]` | View or update the Discord token |
+| `webhook [url]` / `webhook test [url]` | View, update, or live-test the webhook |
+| `backup` (or `export`) | Print current configuration JSON |
+| `validate <file>` / `import <file> [merge\|replace]` | Schema-check / import configs |
+| `service <status\|install\|uninstall\|logs>` | PM2 background service control |
+| `uptime` | Uptime and reliability metrics |
 
 ---
 
 ## 🔀 Drag-and-Drop Schedule Prioritization & Test Runs
 
-### Drag-and-Drop Execution Sequencing
 1. Navigate to **Server Profiles** in the Web Dashboard.
-2. In the schedules table for any server, grab the **Priority handle** (`:::`) on any row.
-3. Drag the schedule row up or down to set its sequence order.
-4. Release the row — the priority badges (`#1`, `#2`...) update immediately and the order is persisted to the backend via `/api/servers/:serverId/schedules/reorder`.
-5. You can also use the inline up/down chevron buttons or the CLI `schedule move` command.
+2. Grab the **priority handle** on any schedule row and drag it up or down — badges (`#1`, `#2`…) update instantly and persist via `/api/servers/:serverId/schedules/reorder`.
+3. Or use the up/down chevrons, or CLI `schedule move` / `schedule reorder`.
+4. Click the emerald **Test Run** play button (▶) on any row for an immediate execution with spinner state, toast feedback, and telemetry refresh — no page reload.
 
-### Time Elapsed Since Last Check-in
-- Each server card displays an elapsed time counter badge with a clock icon (`fa-regular fa-clock`) right beside the Channel ID.
-- Shows the duration since the latest successful check-in (e.g., `< 1m ago`, `2h 15m ago`).
-- Synchronized with the server header uptime badge in real time.
+---
 
-### Immediate 'Test Run' Play Button
-- Click the emerald **Test Run** play button (`▶`) on any schedule row.
-- The button activates an immediate spinner state (`Running...`), executes the attendance routine, logs the outcome, registers the entry in attendance history, and refreshes the elapsed check-in clock without reloading the page.
+## 🏖️ Holidays & Quiet Hours
+
+Some days, attendance should *intentionally* not fire — public holidays, server maintenance, or your sleep hours. Skips are recorded as neutral **`SKIPPED`** history entries: they never count as failures and never break streaks or success rates.
+
+### Holidays (named skip-dates)
+
+```bash
+node bin/cli.js holiday add 2026-12-25 "Christmas Day"
+node bin/cli.js holiday list
+node bin/cli.js holiday remove 2026-12-25
+# A server that operates on holidays:
+node bin/cli.js server ignore-holidays <id> on
+```
+
+- Manage the global list from the CLI above or the dashboard **Holidays manager** (list, add with date-picker, remove).
+- Per-server toggle (`ignoreHolidays`) lives in the server editor — a 24/7 community server can opt out while work servers observe holidays.
+- One-time schedules landing on a holiday are marked skipped, not completed.
+- The upcoming-runs preview automatically excludes holiday dates.
+
+### Quiet hours (daily blackout window)
+
+```bash
+node bin/cli.js quiet 22:00 07:00   # global window (crosses midnight fine)
+node bin/cli.js quiet                # view effective window
+node bin/cli.js quiet clear
+```
+
+- Set globally or override per server (server value wins).
+- Occurrences inside the window still appear in the preview but are flagged; at fire time the worker skips with a clear log line.
+
+---
+
+## 💬 Message Templates & Pools
+
+Make posts feel human and never byte-identical:
+
+- **Variables** (resolved at send time): `{date}` → `Oct 6, 2026`, `{time}` → `09:00 AM`, `{day}` → `Tuesday`, `{server}` → profile name, `{channel}` → channel ID.
+  Example: `"Present — {day}, {date} ✅"` → `"Present — Tuesday, Oct 6, 2026 ✅"`
+- **Variant pools**: give a schedule several messages; one is picked at random each run (on top of jitter). Manage via the wizard's variants step, `schedule pool`, or the dashboard schedule editor.
+- History records the **exact resolved text** that went out, so audits show what was really posted.
+
+---
+
+## 📸 Restore Points (Auto-Backup)
+
+- A snapshot lands in `backups/` **before every real change** (wizard edits, dashboard saves, imports) — but only when something actually changed, keeping the newest 20.
+- CLI: `backups` lists snapshots, `restore <file>` rolls back (with confirmation).
+- Dashboard: `GET /api/config/backups` + `POST /api/config/restore`, with Restore buttons in the backup area.
+- `backup` still prints the live config JSON for quick copies.
+
+---
+
+## 🌐 Web Dashboard Tour
+
+Open 👉 **`http://localhost:3271`** (`npm start`):
+
+- **Server Profiles** — cards with status badges, elapsed-since-check-in clocks, per-channel conflict warnings, drag-and-drop schedules, and Test Run buttons.
+- **Upcoming Runs widget** — the next fire times across all servers with countdowns.
+- **30-Day Analytics** — charts, heatmaps, success rates, streak counters.
+- **Live Logs** — SSE stream with severity filters, search, clear, and CSV export.
+- **Credentials & Webhook** — token + webhook management with live webhook test.
+- **Backup & Import** — schema-validated import (merge/replace) with preview, export with version metadata, and one-click restore points.
+- **Holidays & Quiet Hours** — named-holiday manager and quiet-window controls.
+- **Web CLI Terminal** — full command console with history drop-up, help popover, and one-click run/insert.
+
+Key API endpoints: `/api/status`, `/api/version`, `/api/config`, `/api/servers/*`, `/api/servers/:id/schedules/*`, `/api/servers/:id/conflicts`, `/api/schedules/upcoming`, `/api/config/backups`, `/api/config/restore`, `/api/daemon/start|stop`, `/api/test-webhook`, `/api/stats/daily-checkins`, `/api/servers/health`, `/api/logs*`.
 
 ---
 
 ## 🔄 24/7 Background Service Installation
 
-To run AttendanceBot as a background service that persists across terminal closures and system reboots:
-
 ```bash
-# Install and start PM2 background service
-npm run service:install
-
-# Check service status
-npm run service:status
-
-# Watch real-time logs
-npm run service:logs
-
-# Uninstall/Stop service
-npm run service:uninstall
+npm run service:install   # install & start   |  npm run service:status
+npm run service:logs      # live logs         |  npm run service:uninstall
 ```
+
+The installer **auto-detects your OS** (the CLI shows it on startup, e.g. `🖥️ Detected environment: Windows (10.0.19045)`).
 
 ### Auto-Start on System Boot
 
-- **Windows:** Run in PowerShell as Administrator:
+- **Windows** (PowerShell as Administrator):
   ```powershell
   npm install -g pm2-windows-startup
   pm2-startup install
   ```
-  Note: some windows machine disabled running scripts out-of-the-box. For more information, see about_Execution_Policies at [https:/go.microsoft.com/fwlink/?LinkID=135170](https:/go.microsoft.com/fwlink/?LinkID=135170).
-  
-  Run this if your scripts is disabled on your system. 
-  ```powershell
-  Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
-  npm install -g pm2-windows-startup
-  pm2-startup install
-  ```
-
-- **macOS:**
-  ```bash
-  npx pm2 startup launchd
-  ```
-- **Linux:**
-  ```bash
-  npx pm2 startup systemd
-  ```
+  If scripts are disabled: `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned` first ([docs](https://go.microsoft.com/fwlink/?LinkID=135170)).
+- **macOS:** `npx pm2 startup launchd` (then run the command it prints)
+- **Linux:** `npx pm2 startup systemd`
 
 ### Android (Termux — No Root Required)
 
-1. Install **Termux** from F-Droid.
-2. Install Node.js:
+1. Install [Termux](https://f-droid.org/en/packages/com.termux/) (F-Droid version recommended):
    ```bash
    pkg update && pkg upgrade -y
    pkg install nodejs-lts termux-api -y
    ```
-3. Clone and install AttendanceBot:
+2. Install the project:
    ```bash
-   git clone https://github.com/IamAdedo/attendanceBot.git
-   cd attendanceBot
+   git clone https://github.com/iamadedo/croncord.git
+   cd croncord
    npm install
-   npm start
    ```
-4. Background persistence:
-   - Install **Termux:API** app from F-Droid for Android wake locks.
-   - Install **Termux:Boot** app from F-Droid to automatically launch AttendanceBot when your phone boots.
+3. Configure: `npm run cli`, set up your server, and **accept the exit-time offer to install the daemon** (or run `npm run service:install`). The installer detects Termux automatically and:
+   - Acquires a **wake lock** (needs the [Termux:API](https://f-droid.org/en/packages/com.termux.api/) app) so Android doesn't suspend it
+   - Creates a **Termux:Boot** startup script so the daemon resurrects after reboot
+4. Install [Termux:Boot](https://f-droid.org/en/packages/com.termux.boot/) from F-Droid, open it once — done, no root required.
 
 ---
 
-## 🔑 Obtaining Your Discord Credentials
+## 🔔 Get Notifications on Your Phone (Optional)
 
-### Discord User Token
-> ⚠️ **IMPORTANT**: Your token grants access to your Discord account. Never share it with anyone or commit it to a public repository.
+1. In Discord, go to the channel → gear icon → **Integrations** → **Webhooks** → **New Webhook** → **Copy Webhook URL**
+2. CLI: menu **[10] Credentials** → update webhook (or set it during the Add Server wizard — it's **test-sent before saving**)
+3. Dashboard: **Credentials & Webhook** tab → paste → Test
+4. You'll get a test embed immediately; every run (success, failure, or holiday/quiet skip) can notify you from then on
 
-1. Open Discord in your desktop browser or app.
-2. Press `F12` (or `Ctrl + Shift + I` on Windows/Linux, `Cmd + Option + I` on Mac).
-3. Switch to the **Console** tab.
-4. Paste the following script and press **Enter**:
-   ```javascript
-   (webpackChunkdiscord_app.push([[''],{},e=>{m=[];for(let c in e.c)m.push(e.c[c])}]),m).find(m=>m?.exports?.default?.getToken!==void 0).exports.default.getToken()
-   ```
-5. Copy the returned token string without quotes.
-6. Paste the token into the AttendanceBot dashboard (**Credentials & Webhook** tab).
+---
 
-### Discord Channel ID
-1. In Discord, navigate to **User Settings** (gear icon) → **Advanced** (under App Settings).
-2. Toggle on **Developer Mode**.
-3. Right-click the channel where attendance should post and click **Copy Channel ID**.
+## 📁 Project Files Explained
+
+```
+croncord/
+├── bin/
+│   ├── cli.js               ← Interactive menu + headless commands (npm run cli)
+│   ├── install-service.js   ← PM2 install (auto-detects Windows/macOS/Linux/Termux)
+│   └── uninstall-service.js ← PM2 removal (also cleans Termux boot script)
+├── src/
+│   ├── bot.js               ← Standalone daemon entry (PM2 target)
+│   ├── daemonManager.js     ← Discord client, cron engine, self-heal reconnect
+│   ├── cliEngine.js         ← Headless command parser (also powers the web terminal)
+│   ├── scheduleConflicts.js ← 5-minute clash analysis (CLI + API)
+│   ├── upcoming.js          ← Next-fire timeline computation
+│   ├── suppression.js       ← Quiet-hours + holiday skip rules
+│   ├── configBackups.js     ← Timestamped restore-point snapshots
+│   ├── messageTemplates.js  ← {variable} resolution + pool picking
+│   ├── attendanceHistory.js ← Run history, daily stats, health maps
+│   ├── schemaValidator.js   ← Strict import/config validation
+│   ├── logger.js            ← Leveled logs + SSE streaming + history
+│   ├── version.js           ← Single source of truth (reads package.json)
+│   └── engine/
+│       └── worker.js        ← Sends messages/reactions, jitter, typing sim
+├── public/
+│   ├── index.html           ← Dashboard page
+│   └── app.js               ← Dashboard logic (drag-drop, charts, terminal)
+├── server.js                ← Web dashboard entry (port 3271, npm start)
+├── config.json              ← YOUR SETTINGS (git-ignored, never share!)
+├── config.example.json      ← Safe template of the config shape
+├── backups/                 ← Auto-created restore-point snapshots (newest 20)
+├── logs/server.log          ← Dashboard server output (headless/background mode)
+├── package.json             ← Deps, scripts, version (bump per policy below)
+├── CHANGELOG.md             ← Release history (Keep a Changelog)
+└── README.md                ← This file!
+```
+
+**Important:** `config.json` contains your Discord token. Never share this file or commit it to GitHub!
+
+---
+
+## ⚠️ Important Warnings
+
+### 1. Discord's Rules
+
+Using "self-bots" (bots that control your personal Discord account) **violates Discord's Terms of Service**. While many people use them without issues, Discord *can* ban your account if they detect it.
+
+**How to stay safer:**
+- ✅ Always keep anti-detection jitter enabled (10+ minutes recommended) — pools + templates help further
+- ✅ Don't use this bot on your main Discord account
+- ✅ Use it sparingly (1-2 messages per day max)
+- ✅ Respect holidays/quiet hours so it never posts at odd times
+- ❌ Never post in rapid succession or across many servers
+
+### 2. Keep Your Token Secret
+
+Your Discord token is like your password. If someone gets it, they can read/send messages as you, join/leave servers, and change settings.
+
+**Never:** share it, post it online, or commit `config.json` to GitHub.
+
+### 3. Personal / Educational Use Only
+
+Use this responsibly. Don't spam, don't harass, and respect the communities you're in.
+
+---
+
+## ❓ Troubleshooting
+
+### "npm: command not found"
+Install Node.js 18+: https://nodejs.org/
+
+### "Failed to log into Discord: Unauthorized"
+Your token is wrong or expired — grab a fresh one ([steps above](#-how-to-get-your-discord-token)) and update via CLI **[10]** or the dashboard.
+
+### "Channel not found" / "Missing Permissions"
+Check the Channel ID, your send permission, and that the channel still exists.
+
+### CLI commands act strangely / show unexpected data
+A stale server may be squatting on port 3271 (the CLI routes to any live server). Stop it via CLI **[K]**, or find and kill the old `node server.js` / `bin/cli.js --serve` process, then retry.
+
+### Import rejected by schema validation
+Run `node bin/cli.js validate <file>` to see exact errors (bad cron? non-numeric channel ID? blank name?) — fix and re-import, or restore a snapshot (`backups` → `restore <file>`).
+
+### A run shows SKIPPED, not SUCCESS/FAILED
+That's intentional: the firing landed on a **holiday** or inside **quiet hours**. Check `holiday list` / `quiet`. To exempt a server: `server ignore-holidays <id> on`.
+
+### Bot stops working after a few days
+- v3.9+ self-heals Discord drops (see `status` reconnect state + logs). If it gave up after 5 attempts, `restart` it.
+- Otherwise: token expired, channel deleted, or rate-limited (reduce frequency / raise jitter). Inspect with `npm run service:logs`.
+
+### How do I update the bot?
+```bash
+cd croncord
+git pull
+npm install
+npm run service:uninstall
+npm run service:install
+```
+
+---
+
+## 🛠️ Advanced: Reaction-Based Attendance
+
+Some servers require an emoji reaction instead of a message. In the wizard choose **Reaction mode**, or set it in `config.json`:
+
+```json
+{
+  "id": "1234567891",
+  "label": "09:00 AM (Weekdays)",
+  "cron": "0 9 * * 1-5",
+  "attendanceType": "REACTION",
+  "emoji": "✅",
+  "targetMessageId": "1234567890123456789",
+  "maxJitterMinutes": 10,
+  "active": true
+}
+```
+
+If `targetMessageId` is empty, the bot reacts to the most recent message in the channel. Combine with `messagePool`… (pools apply to message mode; reaction mode uses `emoji`).
+
+### Advanced: schedule variants & holidays in config
+
+```json
+{
+  "label": "09:00 AM (Weekdays)",
+  "cron": "0 9 * * 1-5",
+  "message": "Present — {day}, {date} ✅",
+  "messagePool": ["Present — {day}! ✅", "Here 🙋 ({date})", "Checking in ✅"],
+  "quietHours": { "start": "22:00", "end": "07:00" }
+}
+```
+
+```json
+"globalQuietHours": { "start": "22:00", "end": "07:00" },
+"globalHolidays": [
+  { "date": "2026-12-25", "name": "Christmas Day" },
+  { "date": "2026-01-01", "name": "New Year's Day" }
+]
+```
 
 ---
 
@@ -244,28 +610,19 @@ All notable changes, release history, and version archives are documented in the
 
 ## 📌 Versioning Policy
 
-AttendanceBot adheres to semantic versioning guidelines:
-- **Patch / Minor Bump (`3.0` → `3.1`):** Applied for small improvements, UI enhancements, optimizations, and bug fixes.
-- **Major Bump (`3.0` → `4.0`):** Applied for major feature additions, breaking API changes, or significant architectural updates.
+Croncord adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html):
 
----
-
-## ⚠️ Important Guidelines & Disclaimer
-
-1. **Discord Terms of Service:** Automated user accounts ("self-bots") violate Discord's Terms of Service. Always enable the anti-detection jitter delay, avoid spamming, and consider using dedicated accounts.
-2. **Token Security:** Your Discord token provides full access to your account. Never commit `config.json` to GitHub or disclose your token to anyone.
-3. **Personal & Educational Use:** This software is provided for personal workflow automation and educational purposes. Use responsibly.
+- **Patch / Minor Bump (`3.8` → `3.9`):** Small improvements, UI enhancements, optimizations, bug fixes — and feature batches like the v3.9 restoration + holidays update.
+- **Major Bump (`3.0` → `4.0`):** Breaking API changes or significant architectural overhauls.
+- The version in `package.json` is the **single source of truth** (`src/version.js` reads it live): dashboard badges, `/api/version`, `/api/status`, export payloads, and CLI banners all follow it automatically. Every update bumps it and logs the change in `CHANGELOG.md`.
 
 ---
 
 ## 📞 Support & Community
 
 - **Authors:** IamAdedo, dlazyHNTR
-- **License:** MIT License
-- **Issues & Contributions:** Contributions and bug reports are welcome via GitHub Issues.
-
-*...with love by [https://iamadedo.vercel.app](The \!Lazy Hunter) <||>*
+- **License:** MIT License — free to use, modify, and distribute. **Use at your own risk** — the authors are not responsible for Discord account bans or consequences of use.
+- **Issues & Contributions:** Bug reports and ideas are welcome via GitHub Issues.
 
 
-
-
+...with love by The !Lazy Hunter <||>
