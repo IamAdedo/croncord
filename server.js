@@ -1197,32 +1197,3 @@ server.on('error', (err) => {
     }
 });
 
-// 2. Dev server container adapter on port 3000 (required for dev preview container health check)
-if (PORT !== 3000) {
-    try {
-        const previewServer = app.listen(3000, HOST, () => {
-            logger.info(`Dev preview container adapter online on port 3000`);
-        });
-        previewServer.on('error', (err) => {
-            if (err.code !== 'EADDRINUSE') {
-                logger.warn(`Port 3000 preview listener notice: ${err.message}`);
-            }
-        });
-    } catch (e) {}
-}
-
-// 3. Container runtime port (e.g. Cloud Run process.env.PORT)
-const ENV_PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : null;
-if (ENV_PORT && ENV_PORT !== PORT && ENV_PORT !== 3000) {
-    try {
-        const envServer = app.listen(ENV_PORT, HOST, () => {
-            logger.info(`Container runtime adapter online on port ${ENV_PORT}`);
-        });
-        envServer.on('error', (err) => {
-            if (err.code !== 'EADDRINUSE') {
-                logger.warn(`Container port ${ENV_PORT} notice: ${err.message}`);
-            }
-        });
-    } catch (e) {}
-}
-

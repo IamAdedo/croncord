@@ -38,11 +38,10 @@ const LEGACY_PID_PATH = path.join(__dirname, '..', '.server.pid');
 const LOGS_DIR = path.join(__dirname, '..', 'logs');
 const SERVER_LOG_PATH = path.join(LOGS_DIR, 'server.log');
 
-// Force primary base port to 3271 and prevent conflicts by never looking at port 3000
+// Single-port policy: the dashboard listens ONLY on 3271, so the CLI
+// always probes 3271 (no PORT overrides, no fallback ports).
 const PRIMARY_BASE_PORT = 3271;
-const SERVER_PORT = (process.env.PORT && process.env.PORT !== '3000')
-    ? parseInt(process.env.PORT, 10)
-    : PRIMARY_BASE_PORT;
+const SERVER_PORT = PRIMARY_BASE_PORT;
 let activeServerUrl = `http://127.0.0.1:${SERVER_PORT}`;
 const SERVER_URL = activeServerUrl;
 
@@ -1851,8 +1850,11 @@ const bannerLines = [
   " ╚═════╝╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚═════╝ "
 ];
 
-// Combine side-by-side with vertical centering offset
+// Combine side-by-side with vertical centering offset.
+// Falls back to stacked layout on narrow terminals (<95 cols) to avoid wrap.
 const combinedLogo = [];
+const termCols = process.stdout.columns || 80;
+if (termCols >= 95) {
 const offset = Math.floor((clockLines.length - bannerLines.length) / 2);
 
 for (let i = 0; i < clockLines.length; i++) {
@@ -1864,18 +1866,23 @@ for (let i = 0; i < clockLines.length; i++) {
   
   combinedLogo.push(`${left}   ${right}`);
 }
+} else {
+    combinedLogo.push(...bannerLines);
+}
 
 const logoAndBanner = combinedLogo.join("\n");
 
 const title = `⚡ Welcome to Croncord Management Hub (${DISPLAY_VERSION})`;
 const subtitle = `Dual Interface: Interactive CLI & Web Dashboard`;
 
-// Dynamic box calculation
-const innerWidth = Math.max(title.length, subtitle.length) + 4;
+// Dynamic box calculation (emoji-aware: wide glyphs occupy 2 columns
+// but count as 1-2 UTF-16 units, so measure display width explicitly)
+const visualLen = (str) => [...str].length + ((str.match(/[\u2600-\u27BF\u{1F300}-\u{1FAFF}]/gu) || []).length);
+const innerWidth = Math.max(visualLen(title), visualLen(subtitle)) + 4;
 const border = '═'.repeat(innerWidth);
 
 const pad = (str) => {
-  const totalPadding = innerWidth - str.length;
+  const totalPadding = innerWidth - visualLen(str);
   const left = Math.floor(totalPadding / 2);
   const right = totalPadding - left;
   return ' '.repeat(left) + str + ' '.repeat(right);
