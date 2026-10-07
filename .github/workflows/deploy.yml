@@ -1,4 +1,4 @@
-name: Deploy AttendanceBot
+name: Deploy Croncord
 on:
   push:
     branches:

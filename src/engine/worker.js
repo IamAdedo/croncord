@@ -1,7 +1,7 @@
 /**
  * src/engine/worker.js
  *
- * AttendanceBot (L2E Engine)
+ * Croncord (L2E Engine)
  * Author & Architect: IamAdedo, dlazyHNTR
  *
  * Execution engine responsible for:
@@ -14,6 +14,8 @@
 const https = require('https');
 const logger = require('../logger');
 const attendanceHistory = require('../attendanceHistory');
+const { pickMessage } = require('../messageTemplates');
+const { checkSuppressed } = require('../suppression');
 
 /**
  * Utility pause helper
@@ -36,7 +38,7 @@ function sendWebhookNotification(webhookUrl, embedData) {
             embeds: [
                 {
                     ...embedData,
-                    footer: { text: 'AttendanceBot by IamAdedo, dlazyHNTR' },
+                    footer: { text: 'Croncord by IamAdedo, dlazyHNTR' },
                     timestamp: new Date().toISOString(),
                 },
             ],
@@ -79,10 +81,46 @@ function calculateJitterMs(maxJitterMinutes = 10) {
  * @param {object} server - Server configuration object from config.json
  * @param {object} schedule - Target schedule object to execute
  * @param {string} [globalWebhookUrl=''] - Optional fallback webhook URL
+ * @param {object|null} [config=null] - Full config (global holidays/quiet hours)
+ * @param {object} [opts={}] - { force: true } bypasses suppression (manual test runs)
+ * @returns {Promise<{skipped:boolean,reason?:string}>}
  */
-async function executeAttendanceTask(client, server, schedule, globalWebhookUrl = '') {
+async function executeAttendanceTask(client, server, schedule, globalWebhookUrl = '', config = null, opts = {}) {
     const targetWebhook = server.webhookUrl || globalWebhookUrl;
     const startTime = Date.now();
+    const fireTime = new Date();
+
+    // 0. Intentional-skip rules (holidays / quiet hours) — neutral SKIPPED, never a failure.
+    if (!opts.force) {
+        const suppressed = checkSuppressed(server, config, fireTime);
+        if (suppressed) {
+            console.log(`[Worker] ${suppressed.message} [${server.name} / ${schedule.label}]`);
+            logger.info(`[Worker] ${suppressed.message} [${server.name} / ${schedule.label}]`);
+
+            attendanceHistory.recordExecution({
+                serverId: server.id,
+                serverName: server.name,
+                channelId: server.channelId,
+                scheduleId: schedule.id,
+                scheduleLabel: schedule.label,
+                type: (schedule.attendanceType || 'MESSAGE').toUpperCase(),
+                status: 'SKIPPED',
+                details: `${suppressed.message} Streaks and success rates unaffected.`
+            });
+
+            sendWebhookNotification(targetWebhook, {
+                title: '⏸️ Attendance Skipped (Intentional)',
+                color: 9807270, // Grey
+                fields: [
+                    { name: 'Server Profile', value: server.name || 'Unknown', inline: true },
+                    { name: 'Schedule', value: schedule.label || 'Unknown', inline: true },
+                    { name: 'Reason', value: suppressed.message, inline: false },
+                ],
+            });
+
+            return { skipped: true, reason: suppressed.reason };
+        }
+    }
 
     try {
         console.log(`\n[Worker] ⏰ Schedule triggered for server: "${server.name}" (${schedule.label})`);
@@ -162,8 +200,9 @@ async function executeAttendanceTask(client, server, schedule, globalWebhookUrl 
             });
 
         } else {
-            // Default: MESSAGE Mode
-            const messageText = schedule.message || 'Present';
+            // Default: MESSAGE Mode (template variables resolved, pool variant picked)
+            const picked = pickMessage(schedule, server, new Date());
+            const messageText = picked.text;
 
             // Simulate natural human typing duration based on character count
             if (channel.sendTyping) {
@@ -189,7 +228,7 @@ async function executeAttendanceTask(client, server, schedule, globalWebhookUrl 
                 scheduleLabel: schedule.label,
                 type: 'MESSAGE',
                 status: 'SUCCESS',
-                details: `Message posted successfully: "${messageText}" (ID: ${sentMsg.id})`
+                details: `Message posted successfully: "${messageText}" (ID: ${sentMsg.id})${picked.fromPool ? ' [pool variant]' : ''}`
             });
 
             // Dispatch Success Webhook
@@ -205,6 +244,8 @@ async function executeAttendanceTask(client, server, schedule, globalWebhookUrl 
                 ],
             });
         }
+
+        return { skipped: false };
 
     } catch (err) {
         const totalElapsedSec = Math.round((Date.now() - startTime) / 1000);
@@ -235,6 +276,8 @@ async function executeAttendanceTask(client, server, schedule, globalWebhookUrl 
                 { name: 'Time Elapsed', value: `${totalElapsedSec}s`, inline: true },
             ],
         });
+
+        return { skipped: false, error: err.message };
     }
 }
 

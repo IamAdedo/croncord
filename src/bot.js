@@ -1,7 +1,7 @@
 /**
  * src/bot.js
  *
- * AttendanceBot (L2E Engine)
+ * Croncord (L2E Engine)
  * Author & Architect: IamAdedo, dlazyHNTR
  *
  * Main daemon manager responsible for:
@@ -17,6 +17,7 @@ const cron = require('node-cron');
 const { Client } = require('discord.js-selfbot-v13');
 const { executeAttendanceTask, sendWebhookNotification } = require('./engine/worker');
 const logger = require('./logger');
+const { vacationStatus } = require('./suppression');
 
 const CONFIG_PATH = path.join(__dirname, '..', 'config.json');
 
@@ -32,6 +33,15 @@ try {
 } catch (err) {
     logger.error(`Failed to parse config.json: ${err.message}`);
     process.exit(1);
+}
+
+// Auto-resume: clear an expired vacation at boot (standalone daemon path).
+if (config.vacation && vacationStatus(config.vacation).expired) {
+    config.vacation = null;
+    try {
+        fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), 'utf8');
+    } catch (e) { /* non-fatal */ }
+    logger.info('🏖️ Vacation period ended — all schedules resumed automatically.');
 }
 
 /**
@@ -121,15 +131,20 @@ function initializeSchedules() {
                     return;
                 }
 
-                // Hand off execution entirely to worker.js
-                await executeAttendanceTask(client, server, schedule, config.globalWebhookUrl);
+                // Hand off execution entirely to worker.js (config passed so
+                // global holidays / quiet hours apply to standalone runs too)
+                const result = await executeAttendanceTask(client, server, schedule, config.globalWebhookUrl, config);
 
                 // One-time schedules fire exactly once: disable, persist, and stop the timer.
                 if (isOneTime) {
                     schedule.active = false;
                     persistConfig();
                     job.stop();
-                    logger.success(`[${server.name}] One-time schedule "${schedule.label}" completed and disabled.`);
+                    if (result && result.skipped) {
+                        logger.info(`[${server.name}] One-time schedule "${schedule.label}" fell on a skip rule (${result.reason}) — recorded as skipped.`);
+                    } else {
+                        logger.success(`[${server.name}] One-time schedule "${schedule.label}" completed and disabled.`);
+                    }
                 }
             });
 
@@ -150,14 +165,14 @@ client.on('ready', () => {
     // Send Daemon Startup Notification to Global Webhook if available
     if (config.globalWebhookUrl) {
         sendWebhookNotification(config.globalWebhookUrl, {
-            title: '🟢 AttendanceBot Daemon Started',
+            title: '🟢 Croncord Daemon Started',
             color: 3447003, // Blue
             description: `Background daemon successfully online for **${client.user.tag}**. Monitoring **${activeJobs.length}** active schedule timer(s).`,
             fields: [
                 { name: 'Active Profiles', value: `${config.servers.filter((s) => s.active).length}`, inline: true },
                 { name: 'Active Schedules', value: `${activeJobs.length}`, inline: true },
             ],
-            footer: { text: 'AttendanceBot by IamAdedo, dlazyHNTR' },
+            footer: { text: 'Croncord by IamAdedo, dlazyHNTR' },
         });
     }
 });
@@ -173,7 +188,7 @@ client.on('error', (error) => {
 
 // 4. Graceful Shutdown Signals (PM2 / OS process signals)
 function handleShutdown(signal) {
-    logger.warn(`Received ${signal}. Shutting down AttendanceBot daemon gracefully...`);
+    logger.warn(`Received ${signal}. Shutting down Croncord daemon gracefully...`);
 
     // Stop all running cron jobs
     activeJobs.forEach((job) => job.stop());

@@ -1,10 +1,15 @@
 {
-    "name": "attendanceBot",
-    "version": "3.8.0",
+    "name": "croncord",
+    "version": "4.1.0",
     "description": "Multi-server Discord daily attendance background daemon and web management dashboard",
     "main": "src/bot.js",
     "bin": {
-        "attendanceBot": "bin/cli.js"
+        "croncord": "bin/cli.js",
+        "l2e": "bin/cli.js",
+        "lazyruna": "bin/cli.js",
+        "lazy-runa": "bin/cli.js",
+        "attenda": "bin/cli.js",
+        "attendancebot": "bin/cli.js"
     },
     "scripts": {
         "dev": "node server.js",
@@ -17,10 +22,14 @@
         "bot:daemon": "node src/bot.js",
         "service:install": "node bin/install-service.js",
         "service:uninstall": "node bin/uninstall-service.js",
-        "service:status": "npx pm2 status attendanceBot-daemon",
-        "service:logs": "npx pm2 logs attendanceBot-daemon"
+        "service:status": "npx pm2 status",
+        "service:logs": "npx pm2 logs croncord-daemon",
+        "service:web:status": "npx pm2 status croncord-web",
+        "service:web:logs": "npx pm2 logs croncord-web",
+        "service:web:restart": "npx pm2 restart croncord-web"
     },
     "dependencies": {
+        "cron-parser": "^5.3.0",
         "discord.js-selfbot-v13": "^3.7.0",
         "express": "^5.2.1",
         "node-cron": "^3.0.3",

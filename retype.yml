@@ -11,7 +11,7 @@ exclude:
   - "*.json"
 
 branding:
-  title: AttendanceBot # FIXED: Retype uses 'title', not 'name'
+  title: Croncord # FIXED: Retype uses 'title', not 'name'
   logo: ⚡
   colors:
     primary: "#FF5733" # FIXED: Corrected mapping syntax structure

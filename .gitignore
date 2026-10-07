@@ -1,6 +1,10 @@
 # Configuration & Secrets
 config.json
 .env
+backups/
+.server.pid
+.croncord-server.pid
+logs/
 
 # Dependencies
 node_modules/

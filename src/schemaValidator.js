@@ -1,7 +1,7 @@
 /**
  * src/schemaValidator.js
  *
- * Comprehensive JSON Schema Validator for AttendanceBot server profiles and schedules.
+ * Comprehensive JSON Schema Validator for Croncord server profiles and schedules.
  * Validates configuration exports/imports to ensure structural conformity and data integrity.
  *
  * Version: 3.7.0
@@ -9,6 +9,8 @@
 
 const cron = require('node-cron');
 const { VERSION } = require('./version');
+const { validateQuietHours, validateHoliday, normalizeDateKey } = require('./suppression');
+const { validatePool } = require('./messageTemplates');
 
 /**
  * Validates Discord snowflake IDs (channelId, messageId, etc.)
@@ -56,6 +58,11 @@ function validateConfigSchema(data) {
     let serversArray = [];
     let globalWebhook = '';
     let globalToken = '';
+    let globalQuietHours = null;
+    let globalHolidays = [];
+    let vacation = null;
+    let heartbeat = null;
+    let digest = null;
 
     if (Array.isArray(data)) {
         serversArray = data;
@@ -78,6 +85,81 @@ function validateConfigSchema(data) {
 
         if (data.globalToken && typeof data.globalToken === 'string') {
             globalToken = data.globalToken.trim();
+        }
+
+        if (data.globalQuietHours !== undefined && data.globalQuietHours !== null) {
+            const qhCheck = validateQuietHours(data.globalQuietHours);
+            if (!qhCheck.valid) {
+                errors.push(`Global quiet hours invalid: ${qhCheck.error}`);
+            } else {
+                globalQuietHours = { start: String(data.globalQuietHours.start).trim(), end: String(data.globalQuietHours.end).trim() };
+            }
+        }
+
+        if (data.globalHolidays !== undefined && data.globalHolidays !== null) {
+            if (!Array.isArray(data.globalHolidays)) {
+                errors.push('"globalHolidays" must be an array of { date, name } entries.');
+            } else {
+                const seen = new Set();
+                data.globalHolidays.forEach((h, idx) => {
+                    const check = validateHoliday(h);
+                    if (!check.valid) {
+                        errors.push(`Holiday #${idx + 1} invalid: ${check.error}`);
+                        return;
+                    }
+                    if (seen.has(check.sanitized.date)) {
+                        warnings.push(`Duplicate holiday date ${check.sanitized.date} — keeping the first entry.`);
+                        return;
+                    }
+                    seen.add(check.sanitized.date);
+                    globalHolidays.push(check.sanitized);
+                });
+            }
+        }
+
+        if (data.vacation !== undefined && data.vacation !== null) {
+            const { validateVacation } = require('./suppression');
+            const vCheck = validateVacation(data.vacation);
+            if (!vCheck.valid) {
+                errors.push(`Vacation invalid: ${vCheck.error}`);
+            } else {
+                vacation = vCheck.sanitized.until
+                    ? { until: vCheck.sanitized.until, note: vCheck.sanitized.note || '' }
+                    : null;
+            }
+        }
+
+        if (data.heartbeat !== undefined && data.heartbeat !== null) {
+            const hbUrl = data.heartbeat.url ? String(data.heartbeat.url).trim() : '';
+            let hbOk = false;
+            try {
+                const parsed = new URL(hbUrl);
+                hbOk = parsed.protocol === 'http:' || parsed.protocol === 'https:';
+            } catch (e) { hbOk = false; }
+            if (!hbOk) {
+                errors.push('Heartbeat "url" must be a valid http(s) URL.');
+            } else {
+                heartbeat = {
+                    url: hbUrl,
+                    intervalMinutes: Math.min(Math.max(parseInt(data.heartbeat.intervalMinutes, 10) || 15, 1), 1440),
+                };
+            }
+        }
+
+        if (data.digest !== undefined && data.digest !== null) {
+            const dDay = String(data.digest.day || 'monday').trim().toLowerCase();
+            const dTime = String(data.digest.time || '09:00').trim();
+            const validDays = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+            if (!validDays.includes(dDay)) {
+                errors.push(`Digest "day" must be a weekday name (got "${data.digest.day}").`);
+            } else {
+                const { parseHHMM } = require('./suppression');
+                if (parseHHMM(dTime) === null) {
+                    errors.push(`Digest "time" must be HH:MM (got "${data.digest.time}").`);
+                } else {
+                    digest = { enabled: data.digest.enabled !== false, day: dDay, time: dTime };
+                }
+            }
         }
     }
 
@@ -156,6 +238,18 @@ function validateConfigSchema(data) {
 
         // 4. Active boolean
         const active = srv.active !== undefined ? Boolean(srv.active) : true;
+
+        // 4b. Holiday opt-out + server quiet-hours override
+        const ignoreHolidays = srv.ignoreHolidays !== undefined ? Boolean(srv.ignoreHolidays) : false;
+        let serverQuietHours = null;
+        if (srv.quietHours !== undefined && srv.quietHours !== null) {
+            const qhCheck = validateQuietHours(srv.quietHours);
+            if (!qhCheck.valid) {
+                errors.push(`${prefix}: server quiet hours invalid: ${qhCheck.error}`);
+            } else {
+                serverQuietHours = { start: String(srv.quietHours.start).trim(), end: String(srv.quietHours.end).trim() };
+            }
+        }
 
         // 5. Schedules validation
         const schedulesRaw = srv.schedules;
@@ -240,12 +334,28 @@ function validateConfigSchema(data) {
 
                     const schedActive = sc.active !== undefined ? Boolean(sc.active) : true;
 
+                    // Message variant pool
+                    let messagePool = [];
+                    if (sc.messagePool !== undefined && sc.messagePool !== null) {
+                        const poolCheck = validatePool(sc.messagePool);
+                        if (!poolCheck.valid) {
+                            errors.push(`${scPrefix}: ${poolCheck.error}`);
+                        } else {
+                            messagePool = poolCheck.sanitized;
+                            if (rawType === 'REACTION' && messagePool.length > 0) {
+                                warnings.push(`${scPrefix}: messagePool is ignored for REACTION schedules.`);
+                                messagePool = [];
+                            }
+                        }
+                    }
+
                     sanitizedSchedules.push({
                         id: sc.id ? String(sc.id) : `${Date.now()}_sched_${sIdx}_${scIdx}`,
                         label,
                         cron: cronExp,
                         attendanceType: rawType,
                         message,
+                        messagePool,
                         emoji,
                         targetMessageId,
                         maxJitterMinutes,
@@ -264,6 +374,8 @@ function validateConfigSchema(data) {
             channelId: channelIdRaw,
             webhookUrl,
             active,
+            ignoreHolidays,
+            ...(serverQuietHours ? { quietHours: serverQuietHours } : {}),
             schedules: sanitizedSchedules
         });
     });
@@ -275,10 +387,15 @@ function validateConfigSchema(data) {
         errors,
         warnings,
         sanitized: isValid ? {
-            app: 'AttendanceBot',
+            app: 'Croncord',
             version: VERSION,
             globalWebhookUrl: globalWebhook,
             globalToken: globalToken,
+            ...(globalQuietHours ? { globalQuietHours } : {}),
+            ...(globalHolidays.length > 0 ? { globalHolidays } : {}),
+            ...(vacation ? { vacation } : {}),
+            ...(heartbeat ? { heartbeat } : {}),
+            ...(digest ? { digest } : {}),
             servers: sanitizedServers
         } : null,
         stats: {

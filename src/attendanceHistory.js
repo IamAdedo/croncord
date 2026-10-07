@@ -38,6 +38,11 @@ class AttendanceHistory {
         const timestamp = new Date().toISOString();
         const date = timestamp.slice(0, 10);
 
+        const normStatus = status === 'FAILED' ? 'FAILED' : (status === 'SKIPPED' ? 'SKIPPED' : 'SUCCESS');
+        const defaultDetails = normStatus === 'SUCCESS'
+            ? 'Attendance executed successfully'
+            : (normStatus === 'SKIPPED' ? 'Attendance intentionally skipped (holiday / quiet hours)' : 'Attendance execution failed');
+
         const entry = {
             id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
             timestamp,
@@ -48,9 +53,9 @@ class AttendanceHistory {
             scheduleId: String(scheduleId || ''),
             scheduleLabel: scheduleLabel || 'Attendance Schedule',
             type: (type || 'MESSAGE').toUpperCase(),
-            status: status === 'FAILED' ? 'FAILED' : 'SUCCESS',
+            status: normStatus,
             error: error || null,
-            details: details || (status === 'SUCCESS' ? 'Attendance executed successfully' : 'Attendance execution failed')
+            details: details || defaultDetails
         };
 
         this.history.push(entry);
@@ -83,15 +88,18 @@ class AttendanceHistory {
                 checkins: 0,
                 success: 0,
                 failed: 0,
+                skipped: 0,
             };
         }
 
-        // Tally records
+        // Tally records (SKIPPED is neutral: counted, but excluded from success rate)
         this.history.forEach((item) => {
             if (datesMap[item.date]) {
                 datesMap[item.date].checkins++;
                 if (item.status === 'SUCCESS') {
                     datesMap[item.date].success++;
+                } else if (item.status === 'SKIPPED') {
+                    datesMap[item.date].skipped++;
                 } else {
                     datesMap[item.date].failed++;
                 }
@@ -101,19 +109,25 @@ class AttendanceHistory {
         const dailyList = Object.values(datesMap);
         let totalCheckins = 0;
         let totalSuccess = 0;
+        let totalFailed = 0;
+        let totalSkipped = 0;
         let peakValue = 0;
         let peakDate = null;
 
         dailyList.forEach((day) => {
             totalCheckins += day.checkins;
             totalSuccess += day.success;
+            totalFailed += day.failed;
+            totalSkipped += day.skipped;
             if (day.checkins > peakValue) {
                 peakValue = day.checkins;
                 peakDate = `${day.label} (${day.checkins} check-ins)`;
             }
         });
 
-        const successRate = totalCheckins > 0 ? ((totalSuccess / totalCheckins) * 100).toFixed(1) : '0.0';
+        // Success rate covers decisive runs only — intentional skips never dilute it.
+        const decisive = totalSuccess + totalFailed;
+        const successRate = decisive > 0 ? ((totalSuccess / decisive) * 100).toFixed(1) : '0.0';
         const avgDaily = (totalCheckins / days).toFixed(1);
 
         return {
@@ -122,7 +136,8 @@ class AttendanceHistory {
                 days,
                 totalCheckins,
                 totalSuccess,
-                totalFailed: totalCheckins - totalSuccess,
+                totalFailed,
+                totalSkipped,
                 successRate: `${successRate}%`,
                 avgDaily,
                 peakDay: peakDate || 'None yet'
@@ -130,8 +145,51 @@ class AttendanceHistory {
         };
     }
 
-    getServerHealthMap(servers = []) {
-        const healthMap = {};
+    /**
+     * Weekly digest summary for the digest post + dashboard.
+     * @param {number} days window length (default 7)
+     * @param {Array} servers server profiles for per-server breakdown
+     */
+    getWeeklyDigest(days = 7, servers = []) {
+        const now = new Date();
+        const from = new Date(now.getTime() - (days - 1) * 24 * 60 * 60 * 1000);
+        const fromKey = from.toISOString().slice(0, 10);
+        const toKey = now.toISOString().slice(0, 10);
+        const inWindow = this.history.filter((h) => h.date >= fromKey && h.date <= toKey);
+
+        const count = (st) => inWindow.filter((h) => h.status === st).length;
+        const success = count('SUCCESS');
+        const failed = count('FAILED');
+        const skipped = count('SKIPPED');
+        const decisive = success + failed;
+
+        const perServer = (servers || []).map((s) => {
+            const recs = inWindow.filter((h) => String(h.serverId) === String(s.id));
+            return {
+                serverId: String(s.id),
+                serverName: s.name,
+                active: Boolean(s.active),
+                success: recs.filter((r) => r.status === 'SUCCESS').length,
+                failed: recs.filter((r) => r.status === 'FAILED').length,
+                skipped: recs.filter((r) => r.status === 'SKIPPED').length,
+                total: recs.length,
+            };
+        });
+
+        return {
+            days,
+            from: fromKey,
+            to: toKey,
+            total: inWindow.length,
+            success,
+            failed,
+            skipped,
+            successRate: decisive > 0 ? ((success / decisive) * 100).toFixed(1) + '%' : '0.0%',
+            perServer,
+        };
+    }
+
+    getServerHealthMap(servers = []) {        const healthMap = {};
 
         servers.forEach((server) => {
             const serverId = String(server.id);
@@ -151,6 +209,7 @@ class AttendanceHistory {
             const lastSuccessRecord = successRecords[successRecords.length - 1];
             const successCount = successRecords.length;
             const failCount = serverRecords.filter((r) => r.status === 'FAILED').length;
+            const skipCount = serverRecords.filter((r) => r.status === 'SKIPPED').length;
 
             healthMap[serverId] = {
                 serverId,
@@ -164,6 +223,7 @@ class AttendanceHistory {
                 lastError: lastRecord && lastRecord.error ? lastRecord.error : null,
                 totalSuccess: successCount,
                 totalFailed: failCount,
+                totalSkipped: skipCount,
                 recentExecutions: serverRecords.slice(-5)
             };
         });

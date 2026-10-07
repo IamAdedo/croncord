@@ -3,7 +3,7 @@
 /**
  * bin/cli.js
  *
- * AttendanceBot Interactive and Command-Line Management Interface.
+ * Croncord Interactive and Command-Line Management Interface.
  * Version: 3.7.0
  *
  * Supports:
@@ -12,7 +12,7 @@
  *    or detached background process so the user can continue interacting with the CLI without interruption.
  * 3. Offline standalone mode with direct local config & DaemonManager when web server is not running.
  * 4. Online synchronization over HTTP REST API to localhost:3271 when web server is spinning.
- * 5. Direct CLI argument execution: `attendanceBot status`, `attendanceBot list`, `attendanceBot start`, etc.
+ * 5. Direct CLI argument execution: `croncord status`, `croncord list`, `croncord start`, etc.
  * 6. Interactive menu wizard for servers, duplicate detection with redirect, schedules, credentials, and daemon.
  * 7. Configuration export & import with strict JSON schema validation.
  * 8. PM2 background service management (install, uninstall, status, logs).
@@ -24,6 +24,7 @@ const readline = require('readline');
 const http = require('http');
 const https = require('https');
 const { spawn, exec, execSync } = require('child_process');
+const os = require('os');
 const cron = require('node-cron');
 
 const CliEngine = require('../src/cliEngine');
@@ -31,7 +32,9 @@ const { validateConfigSchema } = require('../src/schemaValidator');
 const { VERSION, DISPLAY_VERSION } = require('../src/version');
 
 const CONFIG_PATH = path.join(__dirname, '..', 'config.json');
-const PID_PATH = path.join(__dirname, '..', '.server.pid');
+const PID_PATH = path.join(__dirname, '..', '.croncord-server.pid');
+// Pre-4.0 installs wrote `.server.pid` — still honored when stopping, then cleaned up.
+const LEGACY_PID_PATH = path.join(__dirname, '..', '.server.pid');
 const LOGS_DIR = path.join(__dirname, '..', 'logs');
 const SERVER_LOG_PATH = path.join(LOGS_DIR, 'server.log');
 
@@ -73,7 +76,7 @@ async function askMultiline(defaultValue = 'Present') {
 }
 
 /**
- * Fast probe to see if AttendanceBot Web Server is online on primary base port 3271.
+ * Fast probe to see if Croncord Web Server is online on primary base port 3271.
  * Strictly avoids looking at port 3000 to prevent port conflicts.
  */
 function probeServer() {
@@ -179,6 +182,69 @@ function saveConfig(data) {
 }
 
 /**
+ * Sends a live test embed to a Discord webhook URL and reports delivery success.
+ * Restored from V1: used at setup time so a webhook is verified BEFORE it is saved.
+ * @param {string} webhookUrl
+ * @returns {Promise<boolean>}
+ */
+function testWebhook(webhookUrl) {
+    return new Promise((resolve) => {
+        try {
+            const url = new URL(webhookUrl);
+            const payload = JSON.stringify({
+                embeds: [
+                    {
+                        title: '🔔 Croncord Webhook Connected',
+                        description: 'Test notification! Webhook alerts are working properly.',
+                        color: 5814783,
+                        footer: { text: 'Croncord by IamAdedo, dlazyHNTR' },
+                        timestamp: new Date().toISOString(),
+                    },
+                ],
+            });
+
+            const req = https.request(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Content-Length': Buffer.byteLength(payload),
+                },
+            }, (res) => resolve(res.statusCode >= 200 && res.statusCode < 300));
+
+            req.on('error', () => resolve(false));
+            req.write(payload);
+            req.end();
+        } catch {
+            resolve(false);
+        }
+    });
+}
+
+/**
+ * Setup-time global webhook prompt with live verification before saving.
+ * Restored from V1: called by the Add Server wizard when no global webhook
+ * is configured yet, so alerts work from the very first schedule.
+ * @param {object} db live config object (mutated + saved on success)
+ */
+async function configureGlobalWebhook(db) {
+    console.log('\n🔔 --- Notification Setup ---');
+    console.log('Provide a Discord Webhook URL to get alerts on your phone whenever attendance posts.');
+    const url = await ask('Enter Global Webhook URL (Press Enter to skip): ');
+
+    if (url) {
+        console.log('📡 Testing Webhook connection...');
+        const ok = await testWebhook(url);
+        if (ok) {
+            db.globalWebhookUrl = url;
+            saveConfig(db);
+            console.log('✅ Webhook verified and saved!');
+        } else {
+            console.log('❌ Webhook test failed. Skipping webhook assignment.');
+        }
+    }
+}
+
+/**
  * Open default web browser cross-platform
  */
 function openBrowser(url) {
@@ -192,6 +258,80 @@ function openBrowser(url) {
             exec(`xdg-open "${url}"`);
         }
     } catch (e) {}
+}
+
+/**
+ * Automatic operating-system / runtime-environment detection.
+ * Identifies Windows, macOS, Linux desktop, tmux sessions, headless Linux,
+ * Android (Termux, no root) and Docker containers so the CLI can tailor its
+ * behavior: separate terminal window vs detached background process, plus
+ * platform-specific guidance (wake lock, Termux:Boot, pm2 startup).
+ *
+ * @returns {{id:string,label:string,detail:string,serverMode:'window'|'tmux'|'background'}}
+ */
+function detectEnvironment() {
+    const platform = process.platform;
+    const prefix = process.env.PREFIX || '';
+    const isTermux = platform === 'android' || prefix.includes('com.termux') || Boolean(process.env.TERMUX_VERSION);
+    const isDocker = fs.existsSync('/.dockerenv') || Boolean(process.env.DOCKER_CONTAINER);
+    const hasDisplay = Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
+    const isTmux = Boolean(process.env.TMUX);
+    const release = (() => { try { return os.release(); } catch (e) { return ''; } })();
+
+    if (isTermux) {
+        return {
+            id: 'termux',
+            label: 'Android (Termux, no root)',
+            detail: 'No systemd here: servers run detached; use termux-wake-lock + Termux:Boot to survive sleep/reboot.',
+            serverMode: 'background',
+        };
+    }
+    if (platform === 'win32') {
+        return {
+            id: 'windows',
+            label: `Windows${release ? ` (${release})` : ''}`,
+            detail: 'Dashboard opens in its own CMD window; PM2 runs the daemon in the background.',
+            serverMode: 'window',
+        };
+    }
+    if (platform === 'darwin') {
+        return {
+            id: 'macos',
+            label: 'macOS',
+            detail: 'Dashboard opens in a new Terminal.app window; PM2 runs the daemon in the background.',
+            serverMode: 'window',
+        };
+    }
+    if (platform === 'linux') {
+        if (hasDisplay) {
+            return {
+                id: 'linux-desktop',
+                label: 'Linux (Desktop GUI)',
+                detail: 'Dashboard opens in your terminal emulator; PM2 runs the daemon in the background.',
+                serverMode: 'window',
+            };
+        }
+        if (isTmux) {
+            return {
+                id: 'linux-tmux',
+                label: 'Linux (tmux session)',
+                detail: 'Dashboard opens in a new tmux window; PM2 runs the daemon in the background.',
+                serverMode: 'tmux',
+            };
+        }
+        return {
+            id: isDocker ? 'docker' : 'linux-headless',
+            label: isDocker ? 'Docker container (Linux)' : 'Linux (headless / SSH)',
+            detail: 'No display detected: servers run as detached background processes logging to logs/server.log.',
+            serverMode: 'background',
+        };
+    }
+    return {
+        id: 'unknown',
+        label: `Unknown platform (${platform})`,
+        detail: 'Falling back to detached background processes; check logs/server.log for server output.',
+        serverMode: 'background',
+    };
 }
 
 /**
@@ -215,7 +355,7 @@ function launchServerInNewTerminal() {
 
     // 1. Windows: Native CMD window
     if (platform === 'win32') {
-        const winCmd = `start "AttendanceBot Web Server (Port ${SERVER_PORT})" cmd.exe /k "cd /d \"${projectRoot}\" && node server.js"`;
+        const winCmd = `start "Croncord Web Server (Port ${SERVER_PORT})" cmd.exe /k "cd /d \"${projectRoot}\" && node server.js"`;
         exec(winCmd);
         return { type: 'new_window', mode: 'Windows CMD Window' };
     }
@@ -230,7 +370,7 @@ function launchServerInNewTerminal() {
     // 3. Tmux session: New window
     if (isTmux) {
         try {
-            exec(`tmux new-window -n "attendancebot-web" "cd '${projectRoot}' && node server.js"`);
+            exec(`tmux new-window -n "croncord-web" "cd '${projectRoot}' && node server.js"`);
             return { type: 'new_window', mode: 'tmux Window' };
         } catch (e) {}
     }
@@ -238,11 +378,11 @@ function launchServerInNewTerminal() {
     // 4. Linux Desktop GUI: Try common desktop terminal emulators
     if (platform === 'linux' && hasDisplay) {
         const termEmulators = [
-            { bin: 'x-terminal-emulator', args: `-T "AttendanceBot Web Server" -e "node '${serverScript}'"` },
-            { bin: 'gnome-terminal', args: `--title="AttendanceBot Web Server" -- node "${serverScript}"` },
+            { bin: 'x-terminal-emulator', args: `-T "Croncord Web Server" -e "node '${serverScript}'"` },
+            { bin: 'gnome-terminal', args: `--title="Croncord Web Server" -- node "${serverScript}"` },
             { bin: 'konsole', args: `--new-tab -e node "${serverScript}"` },
-            { bin: 'xfce4-terminal', args: `--title="AttendanceBot Web Server" -e "node '${serverScript}'"` },
-            { bin: 'xterm', args: `-title "AttendanceBot Web Server" -e "node '${serverScript}'"` },
+            { bin: 'xfce4-terminal', args: `--title="Croncord Web Server" -e "node '${serverScript}'"` },
+            { bin: 'xterm', args: `-title "Croncord Web Server" -e "node '${serverScript}'"` },
             { bin: 'alacritty', args: `-e node "${serverScript}"` },
             { bin: 'kitty', args: `node "${serverScript}"` }
         ];
@@ -279,19 +419,21 @@ function launchServerInNewTerminal() {
  * Stops the running web server if tracked by PID or listening on port
  */
 async function stopWebServer() {
-    console.log('\n⏳ Stopping AttendanceBot Web Server...');
+    console.log('\n⏳ Stopping Croncord Web Server...');
 
     let stopped = false;
-    if (fs.existsSync(PID_PATH)) {
-        try {
-            const pidStr = fs.readFileSync(PID_PATH, 'utf8').trim();
-            const pid = parseInt(pidStr, 10);
-            if (!isNaN(pid) && pid > 0) {
-                process.kill(pid, 'SIGTERM');
-                stopped = true;
-            }
-            fs.unlinkSync(PID_PATH);
-        } catch (e) {}
+    for (const trackedPid of [PID_PATH, LEGACY_PID_PATH]) {
+        if (fs.existsSync(trackedPid)) {
+            try {
+                const pidStr = fs.readFileSync(trackedPid, 'utf8').trim();
+                const pid = parseInt(pidStr, 10);
+                if (!isNaN(pid) && pid > 0) {
+                    process.kill(pid, 'SIGTERM');
+                    stopped = true;
+                }
+                fs.unlinkSync(trackedPid);
+            } catch (e) {}
+        }
     }
 
     // Also attempt killing via fuser / pkill on linux/mac if needed
@@ -342,14 +484,14 @@ async function viewWebServerLogs() {
 function printHeader(isOnline = false, statusData = null) {
     console.clear();
     console.log(`
-███████╗████████╗████████╗███████╗███╗   ██╗██████╗  █████╗ ███╗   ██╗ ██████╗███████╗
-██╔════╝╚══██╔══╝╚══██╔══╝██╔════╝████╗  ██║██╔══██╗██╔══██╗████╗  ██║██╔════╝██╔════╝
-███████╗   ██║      ██║   █████╗  ██╔██╗ ██║██║  ██║███████║██╔██╗ ██║██║     █████╗  
-╚════██║   ██║      ██║   ██╔══╝  ██║╚██╗██║██║  ██║██╔══██║██║╚██╗██║██║     ██╔══╝  
-███████║   ██║      ██║   ███████╗██║ ╚████║██████╔╝██║  ██║██║ ╚████║╚██████╗███████╗
-╚══════╝   ╚═╝      ╚═╝   ╚══════╝╚═╝  ╚═══╝╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝╚══════╝
+ ██████╗ ███████╗ ███████╗███╗   ██╗ ██████╗ ███████╗ ███████╗██████╗ 
+██╔════╝██╔═══██╗██╔═══██╗████╗  ██║██╔════╝██╔═══██╗██╔═══██╗██╔══██╗
+██║     ████████║██║   ██║██╔██╗ ██║██║     ██║   ██║████████║██║  ██║
+██║     ██╔══██║ ██║   ██║██║╚██╗██║██║     ██║   ██║██╔══██║ ██║  ██║
+╚██████╗██║  ██║ ██║   ██║██║ ╚████║╚██████╗██║   ██║██║  ██║ ██████╔╝
+ ╚═════╝╚═╝  ╚═╝  ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝ ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ 
   `);
-    console.log(`⚡ AttendanceBot Management Hub • ${DISPLAY_VERSION}`);
+    console.log(`📆 Croncord Management Hub • ${DISPLAY_VERSION}`);
     console.log('💡 Dual Interface: Interactive Terminal CLI & Web Dashboard');
     if (isOnline) {
         const daemonStatus = statusData?.status || 'UNKNOWN';
@@ -395,6 +537,42 @@ function parseCalendarDate(input) {
     today.setHours(0, 0, 0, 0);
     if (date < today) return null;
     return date;
+}
+
+/**
+ * Validates a time string in "HH:MM" or "HH:MM AM/PM" form.
+ * Restored from V1: every interactive time prompt loops until the
+ * input passes this check, so garbage can never produce a broken cron.
+ * @param {string} input
+ * @returns {boolean}
+ */
+function isValidTime(input) {
+    const [time, modifier] = (input || '').trim().split(/\s+/);
+    if (!time || !/^\d{1,2}:\d{2}$/.test(time)) return false;
+
+    const [h, m] = time.split(':').map(Number);
+    if (m < 0 || m > 59) return false;
+
+    if (modifier) {
+        const mod = modifier.toUpperCase();
+        if (mod !== 'AM' && mod !== 'PM') return false;
+        return h >= 1 && h <= 12;
+    }
+    return h >= 0 && h <= 23;
+}
+
+/**
+ * Prompts for a time value and re-prompts until it passes isValidTime.
+ * @param {string} [defaultValue='09:00 AM']
+ * @returns {Promise<string>}
+ */
+async function askValidTime(defaultValue = '09:00 AM') {
+    let timeInput = await ask(`  Enter time (e.g., 09:00 AM or 21:30) [default: ${defaultValue}]: `) || defaultValue;
+    while (!isValidTime(timeInput)) {
+        console.log('  ❌ Invalid time. Use HH:MM (24h) or HH:MM AM/PM (e.g., 09:00 AM).');
+        timeInput = await ask('  Enter time: ');
+    }
+    return timeInput;
 }
 
 function formatDateLabel(date) {
@@ -445,19 +623,36 @@ async function promptScheduleEntry(existingLabel = null) {
         }
         label = await ask('  Schedule label [default: Custom Schedule]: ') || 'Custom Schedule';
     } else if (freq === '5') {
-        const dateStr = await ask('  Enter target date (YYYY-MM-DD): ');
+        console.log('  📆 Format: YYYY-MM-DD (e.g., 2026-08-10). Past dates are rejected.');
+        let dateStr = await ask('  Enter target date (YYYY-MM-DD): ');
         specificDate = parseCalendarDate(dateStr);
-        const timeInput = await ask('  Enter time (e.g. 09:00 AM or 21:30) [default: 09:00 AM]: ') || '09:00 AM';
+        while (!specificDate) {
+            if ((dateStr || '').trim()) {
+                console.log('  ❌ Invalid or past date. Use YYYY-MM-DD format (e.g., 2026-08-10).');
+            }
+            dateStr = await ask('  Enter target date (YYYY-MM-DD): ');
+            specificDate = parseCalendarDate(dateStr);
+        }
+        const timeInput = await askValidTime();
         cronExp = buildCronExpression(freq, timeInput, null, specificDate);
-        label = specificDate ? `${timeInput} (${formatDateLabel(specificDate)})` : `One-Time ${timeInput}`;
+        label = `${timeInput} (${formatDateLabel(specificDate)})`;
     } else if (freq === '4') {
-        const dayInput = await ask('  Enter day name (e.g. Monday, Friday): ');
-        const dayObj = parseWeekday(dayInput) || { num: 1, name: 'Monday' };
-        const timeInput = await ask('  Enter time (e.g. 09:00 AM or 21:30) [default: 09:00 AM]: ') || '09:00 AM';
+        console.log('  ──────────────────────────────────────────────');
+        WEEKDAYS.forEach((d) => console.log(`  [${d.num}] ${d.name}`));
+        let dayInput = await ask('  Select a day (number or name, e.g., 1 / Monday): ');
+        let dayObj = parseWeekday(dayInput);
+        while (!dayObj) {
+            if ((dayInput || '').trim()) {
+                console.log('  ❌ Invalid day. Enter a number (0-6) or day name (e.g., Monday).');
+            }
+            dayInput = await ask('  Select a day (number or name, e.g., 1 / Monday): ');
+            dayObj = parseWeekday(dayInput);
+        }
+        const timeInput = await askValidTime();
         cronExp = buildCronExpression(freq, timeInput, dayObj.num, null);
         label = `${timeInput} (Every ${dayObj.name})`;
     } else {
-        const timeInput = await ask('  Enter time (e.g. 09:00 AM or 21:30) [default: 09:00 AM]: ') || '09:00 AM';
+        const timeInput = await askValidTime();
         cronExp = buildCronExpression(freq, timeInput, null, null);
         const freqName = freq === '1' ? 'Everyday' : freq === '2' ? 'Weekdays' : 'Weekends';
         label = `${timeInput} (${freqName})`;
@@ -470,6 +665,7 @@ async function promptScheduleEntry(existingLabel = null) {
 
     let attendanceType = 'MESSAGE';
     let message = 'Present';
+    let messagePool = [];
     let emoji = '👍';
     let targetMessageId = '';
 
@@ -479,6 +675,16 @@ async function promptScheduleEntry(existingLabel = null) {
         targetMessageId = await ask('  Target Message ID (leave blank to react to newest message in channel): ');
     } else {
         message = await askMultiline('Present');
+        console.log('  💬 Optional message variants: one is picked at random per run (anti-detection).');
+        console.log('     Tip: {day}, {date}, {time}, {server} resolve automatically. Blank line = done.');
+        while (messagePool.length < 20) {
+            const variant = await ask(`  Variant #${messagePool.length + 1} (blank to finish): `);
+            if (!variant) break;
+            messagePool.push(variant);
+        }
+        if (messagePool.length > 0) {
+            console.log(`  ✅ ${messagePool.length} variant(s) saved — base message + variants rotate randomly.`);
+        }
     }
 
     const jitter = await ask('  Max random delay in minutes (Anti-Detection) [default: 10]: ') || '10';
@@ -489,12 +695,168 @@ async function promptScheduleEntry(existingLabel = null) {
         cron: cronExp,
         attendanceType,
         message,
+        messagePool,
         emoji,
         targetMessageId,
         maxJitterMinutes: parseInt(jitter, 10) || 10,
         active: true,
         ...(specificDate ? { type: 'ONCE', runDate: specificDate.toISOString() } : {}),
     };
+}
+
+/**
+ * Prompts for the attendance action (message vs reaction) of a single slot
+ * and returns the mode-specific fields.
+ * @returns {Promise<{attendanceType:string,message:string,messagePool:Array,emoji:string,targetMessageId:string}>}
+ */
+async function promptSlotActionMode() {
+    console.log('     Action: [1] Text Message  |  [2] Emoji Reaction');
+    const modeChoice = await ask('     Select action (1-2) [default: 1]: ') || '1';
+
+    if (modeChoice === '2') {
+        const emoji = await ask('     Reaction emoji [default: 👍]: ') || '👍';
+        const targetMessageId = await ask('     Target Message ID (blank = newest message): ');
+        return { attendanceType: 'REACTION', message: 'Present', messagePool: [], emoji, targetMessageId: (targetMessageId || '').trim() };
+    }
+
+    const message = await askMultiline('Present');
+    const messagePool = [];
+    console.log('     Extra variants (random pick per run, blank line = done):');
+    while (messagePool.length < 20) {
+        const variant = await ask(`     Variant #${messagePool.length + 1} (blank to finish): `);
+        if (!variant) break;
+        messagePool.push(variant);
+    }
+    return { attendanceType: 'MESSAGE', message, messagePool, emoji: '👍', targetMessageId: '' };
+}
+
+/**
+ * Multi-Time / Multi-Day batch schedule builder.
+ * Restored from V1: lets the user pick one or more days (repeating weekday
+ * OR one-time calendar date) and assign one or more times to EACH day in a
+ * single pass ("Add another time for this day?" / "Schedule another day?").
+ *
+ * @returns {Promise<Array>} Array of schedule objects
+ */
+async function promptScheduleBatch() {
+    const schedules = [];
+    let addingDays = true;
+
+    console.log('  ──────────────────────────────────────────────');
+    console.log('  [a] Repeating weekday (every Monday, every Friday...)');
+    console.log('  [b] One-time date (send on a specific calendar day)');
+    const dayType = (await ask('  What kind of day? (a/b) [default: a]: ') || 'a').toLowerCase();
+
+    while (addingDays) {
+        let specificDate = null;
+        let dayName = null;
+        let dayLabel = '';
+
+        if (dayType === 'b') {
+            // One-time calendar date
+            console.log('\n  📆 Format: YYYY-MM-DD (e.g., 2026-08-10)');
+            let dateInput = await ask('  Enter the date: ');
+            let parsed = parseCalendarDate(dateInput);
+            while (!parsed) {
+                if ((dateInput || '').trim()) {
+                    console.log('  ❌ Invalid or past date. Use YYYY-MM-DD format (e.g., 2026-08-10).');
+                }
+                dateInput = await ask('  Enter the date: ');
+                parsed = parseCalendarDate(dateInput);
+            }
+            specificDate = parsed;
+            dayLabel = formatDateLabel(parsed);
+            console.log(`  ✅ Selected date: ${dayLabel}\n`);
+        } else {
+            // Repeating weekday
+            console.log('  ──────────────────────────────────────────────');
+            WEEKDAYS.forEach((d) => console.log(`  [${d.num}] ${d.name}`));
+            let dayInput = await ask('  Select a day (number or name, e.g., 1 / Monday): ');
+            let parsed = parseWeekday(dayInput);
+            while (!parsed) {
+                if ((dayInput || '').trim()) {
+                    console.log('  ❌ Invalid day. Enter a number (0-6) or day name (e.g., Monday).');
+                }
+                dayInput = await ask('  Select a day (number or name, e.g., 1 / Monday): ');
+                parsed = parseWeekday(dayInput);
+            }
+            dayName = { num: parsed.num, name: parsed.name };
+            dayLabel = parsed.name;
+            console.log(`  ✅ Selected day: ${dayLabel}\n`);
+        }
+
+        // Inner loop: one or more times for this day
+        let addingTimes = true;
+        while (addingTimes) {
+            console.log(`  ⏰ --- Time slot for ${dayLabel} ---`);
+            const timeInput = await askValidTime();
+            const action = await promptSlotActionMode();
+            const jitter = await ask('     Max random delay in minutes (Anti-Detection) [default: 10]: ') || '10';
+
+            const cron = buildCronExpression(null, timeInput, dayName ? dayName.num : null, specificDate);
+            const label = specificDate
+                ? `${timeInput} (${formatDateLabel(specificDate)})`
+                : `${timeInput} (${dayLabel})`;
+
+            const schedule = {
+                id: Date.now().toString() + Math.floor(Math.random() * 1000),
+                label,
+                cron,
+                attendanceType: action.attendanceType,
+                message: action.message,
+                messagePool: action.messagePool || [],
+                emoji: action.emoji,
+                targetMessageId: action.targetMessageId,
+                maxJitterMinutes: parseInt(jitter, 10) || 10,
+                active: true,
+            };
+
+            if (specificDate) {
+                schedule.type = 'ONCE';
+                schedule.runDate = specificDate.toISOString();
+            }
+
+            schedules.push(schedule);
+            console.log(`  ✅ Added: "${label}" -> ${action.attendanceType === 'REACTION' ? `Reaction ${action.emoji}` : `Message: "${action.message}"`}\n`);
+
+            const moreTimes = (await ask(`  ❓ Add another time for ${dayLabel}? (y/N): `)).toLowerCase();
+            addingTimes = moreTimes === 'y';
+        }
+
+        const moreDays = (await ask('\n  ❓ Schedule another day? (y/N): ')).toLowerCase();
+        addingDays = moreDays === 'y';
+    }
+
+    return schedules;
+}
+
+/**
+ * Schedule collection entry point used by the server wizards.
+ * Offers the guided single-routine builder and the V1 multi-time/multi-day
+ * batch builder that adds several times per day across several days at once.
+ *
+ * @returns {Promise<Array>} Array of schedule objects
+ */
+async function collectSchedulesInteractive() {
+    console.log('\n  📅 --- Schedule Builder ---');
+    console.log('  [1] Guided builder (one routine at a time, full options)');
+    console.log('  [2] Multi-Time / Multi-Day batch (several times per day, several days in one pass)');
+    const mode = await ask('  Select builder mode (1-2) [default: 1]: ') || '1';
+
+    if (mode === '2') {
+        return promptScheduleBatch();
+    }
+
+    const schedules = [await promptScheduleEntry()];
+    while (true) {
+        const more = await ask('\nAdd another schedule routine? (y/N): ');
+        if (more.toLowerCase() === 'y') {
+            schedules.push(await promptScheduleEntry());
+        } else {
+            break;
+        }
+    }
+    return schedules;
 }
 
 /**
@@ -515,6 +877,10 @@ async function addServerWizard() {
         if (change.toLowerCase() === 'y') {
             db.globalToken = await ask('   Enter new Discord User Token: ');
         }
+    }
+
+    if (!db.globalWebhookUrl) {
+        await configureGlobalWebhook(db);
     }
 
     const name = await ask('\n2. Profile Name for this server (e.g. Work-DAO): ');
@@ -554,18 +920,8 @@ async function addServerWizard() {
 
     const customWebhook = await ask('4. Custom Webhook URL for this server (leave blank to use global): ');
 
-    // Collect initial schedule(s)
-    const schedules = [];
-    schedules.push(await promptScheduleEntry());
-
-    while (true) {
-        const more = await ask('\nAdd another schedule routine to this server profile? (y/N): ');
-        if (more.toLowerCase() === 'y') {
-            schedules.push(await promptScheduleEntry());
-        } else {
-            break;
-        }
-    }
+    // Collect initial schedule(s): guided single routines or multi-time/multi-day batch
+    const schedules = await collectSchedulesInteractive();
 
     const newServer = {
         id: Date.now().toString(),
@@ -597,10 +953,10 @@ async function addScheduleWizardForServer(srv) {
     printHeader(isOnline, serverStatusData);
     console.log(`📅 Add Schedule Routine to Server: "${srv.name}" (Channel: ${srv.channelId})\n`);
 
-    const newSched = await promptScheduleEntry();
+    const newScheds = await collectSchedulesInteractive();
 
     if (!srv.schedules) srv.schedules = [];
-    srv.schedules.push(newSched);
+    srv.schedules.push(...newScheds);
 
     const db = loadConfig();
     const idx = db.servers.findIndex(s => String(s.id) === String(srv.id));
@@ -609,8 +965,10 @@ async function addScheduleWizardForServer(srv) {
         saveConfig(db);
     }
 
-    console.log(`\n✅ Added schedule "${newSched.label}" to server "${srv.name}"!`);
-    console.log(`Cron: "${newSched.cron}" | Mode: ${newSched.attendanceType} | Anti-Detection Delay: ${newSched.maxJitterMinutes}m`);
+    console.log(`\n✅ Added ${newScheds.length} schedule routine(s) to server "${srv.name}"!`);
+    newScheds.forEach((sc) => {
+        console.log(`   • "${sc.label}" | Cron: "${sc.cron}" | Mode: ${sc.attendanceType} | Jitter: ${sc.maxJitterMinutes}m`);
+    });
 
     if (isOnline) {
         await dispatchCommand('restart');
@@ -825,10 +1183,10 @@ async function toggleDaemonAction() {
 async function pm2ServiceMenu() {
     const isOnline = await probeServer();
     printHeader(isOnline, serverStatusData);
-    console.log('⚙️ PM2 Background Service Manager\n');
+    console.log('⚙️ PM2 Background Service Manager (daemon + web dashboard)\n');
     console.log('  [1] Check PM2 Service Status');
-    console.log('  [2] Install / Start Service via PM2 (npm run service:install)');
-    console.log('  [3] Uninstall / Stop Service via PM2 (npm run service:uninstall)');
+    console.log('  [2] Install / Start Services via PM2 (npm run service:install)');
+    console.log('  [3] Uninstall / Stop Services via PM2 (npm run service:uninstall)');
     console.log('  [4] View PM2 Background Logs');
     console.log('  [b] Return');
 
@@ -865,11 +1223,11 @@ async function exportImportMenu() {
 
     const ch = await ask('\nSelect option (1-3, or b): ');
     if (ch === '1') {
-        const defaultFilename = `attendancebot-config-${Date.now()}.json`;
+        const defaultFilename = `croncord-config-${Date.now()}.json`;
         const targetFile = await ask(`Enter target file path [default: ${defaultFilename}]: `) || defaultFilename;
         const config = loadConfig();
         const exportPayload = {
-            app: 'AttendanceBot',
+            app: 'Croncord',
             version: VERSION,
             exportedAt: new Date().toISOString(),
             globalWebhookUrl: config.globalWebhookUrl || '',
@@ -1024,7 +1382,7 @@ async function interactiveRepl() {
     console.log('Type "exit" or "menu" to return to main menu.\n');
 
     while (true) {
-        const cmd = await ask('attendancebot:~$ ');
+        const cmd = await ask('croncord:~$ ');
         const trimmed = cmd.trim();
         if (!trimmed) continue;
         if (trimmed.toLowerCase() === 'exit' || trimmed.toLowerCase() === 'menu' || trimmed.toLowerCase() === 'quit') {
@@ -1056,10 +1414,16 @@ async function spinUpServerWorkflow() {
         return;
     }
 
-    console.log('\n🚀 Launching AttendanceBot Web Dashboard on a new terminal window...');
+    console.log('\n🚀 Launching Croncord Web Dashboard on a new terminal window...');
     const result = launchServerInNewTerminal();
 
-    console.log(`   Launcher: ${result.mode || result.type}`);
+    console.log(`   Launcher: ${result.mode || result.type} (auto-selected for ${detectEnvironment().label})`);
+    if (result.type === 'background') {
+        console.log(`   📄 Server output streams to ${SERVER_LOG_PATH} (view anytime with menu option [L]).`);
+        if (detectEnvironment().id === 'termux') {
+            console.log('   📱 Termux tip: run termux-wake-lock so Android does not suspend the server.');
+        }
+    }
     console.log('⏳ Waiting for server to initialize...');
 
     let attempts = 0;
@@ -1081,6 +1445,279 @@ async function spinUpServerWorkflow() {
     await ask('\nPress Enter to return to menu...');
 }
 
+/**
+ * Offers to install and start the background daemon service via PM2.
+ * Restored from V1: invoked automatically on CLI exit when active
+ * schedules exist, so attendance keeps running after the terminal closes.
+ * Spawns `npm run service:install` when the user accepts.
+ */
+async function offerServiceInstall() {
+    console.log('\n🚀 --- Start Background Daemon ---');
+    console.log('Your attendance schedules are configured. To keep them running');
+    console.log('automatically in the background (even after terminal closes),');
+    console.log('install the daemon service now.');
+
+    const answer = await ask('\nInstall and start the background daemon? (Y/n): ');
+    if (answer.toLowerCase() === 'n') {
+        console.log('⏭️ Skipped. Run "npm run service:install" manually when ready.');
+        return;
+    }
+
+    console.log('\n📦 Installing daemon service...');
+    const child = spawn('npm', ['run', 'service:install'], {
+        stdio: 'inherit',
+        shell: true,
+        cwd: path.join(__dirname, '..'),
+    });
+
+    await new Promise((resolve) => {
+        child.on('close', (code) => {
+            if (code === 0) {
+                console.log('\n✅ Daemon installed and started successfully!');
+            } else {
+                console.log(`\n⚠️ Installation exited with code ${code}. Check logs above.`);
+            }
+            resolve();
+        });
+    });
+}
+
+/**
+ * Planning submenu: upcoming runs, holidays, quiet hours, restore points.
+ */
+async function planningMenu() {
+    while (true) {
+        const isOnline = await probeServer();
+        printHeader(isOnline, serverStatusData);
+        console.log('🔮 Planning: Upcoming Runs, Holidays, Quiet Hours & Restore Points\n');
+        console.log('  [1] View Upcoming Runs (next fire times)');
+        console.log('  [2] Monthly Firing Calendar');
+        console.log('  [3] Manage Holidays (intentional skip dates)');
+        console.log('  [4] Manage Quiet Hours (daily blackout window)');
+        console.log('  [5] Vacation Mode (pause all until a date)');
+        console.log('  [6] Weekly Digest (stats auto-post)');
+        console.log('  [7] Heartbeat Monitor (external pings)');
+        console.log('  [8] Config Restore Points (list / roll back)');
+        console.log('  [b] Back to Main Menu');
+
+        const ch = (await ask('\nSelect option (1-8, or b): ')).toLowerCase();
+        if (ch === 'b' || !ch) break;
+
+        if (ch === '1') {
+            const count = await ask('How many upcoming runs? [default: 10]: ') || '10';
+            const r = await dispatchCommand(`upcoming ${count}`);
+            console.log(`\n${r.output}`);
+            await ask('\nPress Enter to continue...');
+        } else if (ch === '2') {
+            const r = await dispatchCommand('calendar');
+            console.log(`\n${r.output}`);
+            await ask('\nPress Enter to continue...');
+        } else if (ch === '3') {
+            const r = await dispatchCommand('holiday list');
+            console.log(`\n${r.output}`);
+            console.log('\n  [a] Add a holiday   [r] Remove a holiday   [Enter] Back');
+            const act = (await ask('Choose: ')).toLowerCase();
+            if (act === 'a') {
+                const date = await ask('Date (YYYY-MM-DD): ');
+                const name = await ask('Holiday name (e.g. Christmas Day): ');
+                if (date && name) {
+                    const r2 = await dispatchCommand(`holiday add "${date}" "${name}"`);
+                    console.log(`\n${r2.output}`);
+                } else {
+                    console.log('❌ Both date and name are required.');
+                }
+                await ask('\nPress Enter to continue...');
+            } else if (act === 'r') {
+                const date = await ask('Date to remove (YYYY-MM-DD): ');
+                if (date) {
+                    const r2 = await dispatchCommand(`holiday remove "${date}"`);
+                    console.log(`\n${r2.output}`);
+                }
+                await ask('\nPress Enter to continue...');
+            }
+        } else if (ch === '4') {
+            const r = await dispatchCommand('quiet');
+            console.log(`\n${r.output}`);
+            console.log('\n  [s] Set quiet hours   [c] Clear   [Enter] Back');
+            const act = (await ask('Choose: ')).toLowerCase();
+            if (act === 's') {
+                const start = await ask('Window start (HH:MM, 24h): ');
+                const end = await ask('Window end (HH:MM, 24h): ');
+                if (start && end) {
+                    const r2 = await dispatchCommand(`quiet ${start} ${end}`);
+                    console.log(`\n${r2.output}`);
+                } else {
+                    console.log('❌ Both start and end are required.');
+                }
+                await ask('\nPress Enter to continue...');
+            } else if (act === 'c') {
+                const r2 = await dispatchCommand('quiet clear');
+                console.log(`\n${r2.output}`);
+                await ask('\nPress Enter to continue...');
+            }
+        } else if (ch === '5') {
+            const r = await dispatchCommand('vacation');
+            console.log(`\n${r.output}`);
+            console.log('\n  [a] Arm vacation   [c] Cancel vacation   [Enter] Back');
+            const act = (await ask('Choose: ')).toLowerCase();
+            if (act === 'a') {
+                const until = await ask('Pause until (YYYY-MM-DD): ');
+                const note = await ask('Note (optional): ');
+                if (until) {
+                    const r2 = await dispatchCommand(`vacation "${until}" "${note}"`);
+                    console.log(`\n${r2.output}`);
+                } else {
+                    console.log('❌ An end date is required.');
+                }
+                await ask('\nPress Enter to continue...');
+            } else if (act === 'c') {
+                const r2 = await dispatchCommand('vacation off');
+                console.log(`\n${r2.output}`);
+                await ask('\nPress Enter to continue...');
+            }
+        } else if (ch === '6') {
+            const r = await dispatchCommand('digest');
+            console.log(`\n${r.output}`);
+            console.log('\n  [e] Enable/set schedule   [t] Send test now   [o] Turn off   [Enter] Back');
+            const act = (await ask('Choose: ')).toLowerCase();
+            if (act === 'e') {
+                const day = await ask('Day (e.g. monday) [default: monday]: ') || 'monday';
+                const time = await ask('Time HH:MM (24h) [default: 09:00]: ') || '09:00';
+                const r2 = await dispatchCommand(`digest on ${day} ${time}`);
+                console.log(`\n${r2.output}`);
+                await ask('\nPress Enter to continue...');
+            } else if (act === 't') {
+                const r2 = await dispatchCommand('digest test');
+                console.log(`\n${r2.output}`);
+                await ask('\nPress Enter to continue...');
+            } else if (act === 'o') {
+                const r2 = await dispatchCommand('digest off');
+                console.log(`\n${r2.output}`);
+                await ask('\nPress Enter to continue...');
+            }
+        } else if (ch === '7') {
+            const r = await dispatchCommand('heartbeat');
+            console.log(`\n${r.output}`);
+            console.log('\n  [s] Set heartbeat   [t] Test ping   [o] Turn off   [Enter] Back');
+            const act = (await ask('Choose: ')).toLowerCase();
+            if (act === 's') {
+                const url = await ask('Heartbeat URL: ');
+                const mins = await ask('Interval minutes [default: 15]: ') || '15';
+                if (url) {
+                    const r2 = await dispatchCommand(`heartbeat "${url}" ${mins}`);
+                    console.log(`\n${r2.output}`);
+                } else {
+                    console.log('❌ A URL is required.');
+                }
+                await ask('\nPress Enter to continue...');
+            } else if (act === 't') {
+                const r2 = await dispatchCommand('heartbeat test');
+                console.log(`\n${r2.output}`);
+                await ask('\nPress Enter to continue...');
+            } else if (act === 'o') {
+                const r2 = await dispatchCommand('heartbeat off');
+                console.log(`\n${r2.output}`);
+                await ask('\nPress Enter to continue...');
+            }
+        } else if (ch === '8') {
+            const r = await dispatchCommand('backups');
+            console.log(`\n${r.output}`);
+            const pick = await ask('\nEnter # to restore (blank to go back): ');
+            const n = parseInt(pick, 10);
+            if (!isNaN(n) && n >= 1) {
+                const lines = (r.output || '').split('\n');
+                const entry = lines.find((l) => l.trim().startsWith(`#${n} `));
+                const file = entry ? (entry.match(/(config-.*\.json)/) || [])[1] : null;
+                if (!file) {
+                    console.log('❌ Could not resolve that entry.');
+                } else {
+                    const confirm = await ask(`⚠️ Roll back to "${file}"? (y/N): `);
+                    if (confirm.toLowerCase() === 'y') {
+                        const r2 = await dispatchCommand(`restore "${file}"`);
+                        console.log(`\n${r2.output}`);
+                    }
+                }
+                await ask('\nPress Enter to continue...');
+            }
+        }
+    }
+}
+
+/**
+ * Global launch aliases registered in package.json "bin" (via `npm link`).
+ * After linking, any of these launch this CLI from ANY directory.
+ */
+const GLOBAL_CMDS = ['croncord', 'l2e', 'lazyruna', 'lazy-runa', 'attenda', 'attendancebot'];
+
+/**
+ * Checks whether a command resolves on this machine's PATH.
+ * @param {string} cmd
+ * @returns {boolean}
+ */
+function commandExists(cmd) {
+    try {
+        if (process.platform === 'win32') {
+            execSync(`where ${cmd}`, { stdio: 'ignore' });
+        } else {
+            execSync(`command -v ${cmd}`, { stdio: 'ignore', shell: '/bin/sh' });
+        }
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Offers to link the CLI globally (runs `npm link` in the project root) so
+ * the user can launch it from anywhere on the machine via any alias.
+ * Skips silently when every alias already resolves.
+ */
+async function offerGlobalLink() {
+    const missing = GLOBAL_CMDS.filter((c) => !commandExists(c));
+    if (missing.length === 0) {
+        return;
+    }
+
+    console.log('\n🌐 --- Global CLI Access (launch from anywhere) ---');
+    console.log('Link Croncord to this machine so you can open it from ANY directory:');
+    GLOBAL_CMDS.forEach((c) => {
+        const status = commandExists(c) ? '✅' : '⬜';
+        console.log(`   ${status} ${c}`);
+    });
+
+    const answer = await ask('\nLink globally now? (runs "npm link") (Y/n): ');
+    if (answer.toLowerCase() === 'n') {
+        console.log('⏭️ Skipped. Run "npm link" in the project folder whenever you want this.');
+        return;
+    }
+
+    console.log('\n🔗 Linking global commands...');
+    const code = await new Promise((resolve) => {
+        const child = spawn('npm', ['link'], {
+            stdio: 'inherit',
+            shell: true,
+            cwd: path.join(__dirname, '..'),
+        });
+        child.on('close', (c) => resolve(c));
+    });
+
+    const stillMissing = GLOBAL_CMDS.filter((c) => !commandExists(c));
+    if (code === 0 && stillMissing.length === 0) {
+        console.log('\n✅ Global link installed! Launch from any directory with:');
+        GLOBAL_CMDS.forEach((c) => console.log(`   • ${c}`));
+        console.log('   (Unlink anytime with "npm unlink -g croncord".)');
+    } else {
+        console.log(`\n⚠️ Link incomplete (exit ${code}). Missing: ${stillMissing.join(', ') || 'none'}.`);
+        console.log('   Try once with elevated rights, then re-run:');
+        if (process.platform === 'win32') {
+            console.log('   1. Open PowerShell as Administrator, cd to this project, run "npm link".');
+        } else {
+            console.log('   • Run "sudo npm link" in the project folder (macOS/Linux).');
+        }
+        console.log('   Also confirm your npm global bin dir is on PATH ("npm config get prefix").');
+    }
+}
+
 async function mainMenu() {
     while (true) {
         const isOnline = await probeServer();
@@ -1097,6 +1734,7 @@ async function mainMenu() {
         console.log('  [8] Configuration Backup & Import (Strict Schema Validation)');
         console.log('  [9] Live Activity Logs (Terminal Stream)');
         console.log('  [10] Discord Credentials & Notification Webhook Setup');
+        console.log('  [11] Upcoming Runs, Holidays, Quiet Hours & Restore Points');
         console.log('  [C] Interactive Command Console (REPL)');
         console.log('');
         console.log('  --- WEB DASHBOARD CONTROLS ---');
@@ -1150,6 +1788,8 @@ async function mainMenu() {
             await viewLogsAction();
         } else if (choice === '10') {
             await updateCredentialsAction();
+        } else if (choice === '11') {
+            await planningMenu();
         } else if (choice === 'c') {
             await interactiveRepl();
         } else if (choice === 'w') {
@@ -1164,7 +1804,20 @@ async function mainMenu() {
         } else if (choice === 'l') {
             await viewWebServerLogs();
         } else if (choice === 'q') {
-            console.log('\n👋 Exiting AttendanceBot CLI. Your background daemon and schedules will keep running. Goodbye!\n');
+            // Offer to launch the background daemon before quitting, but only
+            // when there's something worth running (restored V1 exit behavior).
+            const db = loadConfig();
+            const hasActiveSchedules = (db.servers || []).some(
+                (s) => s.active && (s.schedules || []).some((sc) => sc.active)
+            );
+            if (hasActiveSchedules) {
+                await offerServiceInstall();
+            }
+
+            // Offer global PATH linking so the CLI launches from anywhere.
+            await offerGlobalLink();
+
+            console.log('\n👋 Exiting Croncord CLI. Settings saved. Goodbye!\n');
             rl.close();
             process.exit(0);
         }
@@ -1178,11 +1831,18 @@ async function promptStartupMode() {
     console.clear();
     console.log(`
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║               ⚡ Welcome to AttendanceBot Management Hub (${DISPLAY_VERSION})            ║
+║               ⚡ Welcome to Croncord Management Hub (${DISPLAY_VERSION})            ║
 ║                  Dual Interface: Interactive CLI & Web Dashboard             ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 `);
-    console.log('How would you like to manage AttendanceBot today?\n');
+    console.log('How would you like to manage Croncord today?\n');
+    const startupEnv = detectEnvironment();
+    console.log(`  🖥️ Detected environment: ${startupEnv.label}`);
+    console.log(`     ${startupEnv.detail}`);
+    if (startupEnv.id === 'termux') {
+        console.log('     💡 Tip: run "pkg install termux-api" + termux-wake-lock so Android never sleeps the daemon.');
+    }
+    console.log('');
     console.log('  [1] Interactive Terminal CLI (Default: manage profiles, schedules & daemon here)');
     console.log(`  [2] Launch Web Dashboard in a New Terminal Window (http://localhost:${SERVER_PORT})`);
     console.log('  [3] Dual Mode (Spin Web Server in new window + Continue in Terminal CLI)\n');
@@ -1190,7 +1850,7 @@ async function promptStartupMode() {
     const choice = await ask('Select management mode (1-3) [default: 1]: ') || '1';
 
     if (choice === '2') {
-        console.log('\n🚀 Launching AttendanceBot Web Server in a new window...');
+        console.log('\n🚀 Launching Croncord Web Server in a new window...');
         launchServerInNewTerminal();
         console.log('⏳ Waiting for server to initialize...');
         let attempts = 0;
@@ -1240,7 +1900,7 @@ async function main() {
 
     if (args.length > 0) {
         // Direct command execution from terminal!
-        // e.g. attendanceBot status, attendanceBot list, attendanceBot start, attendanceBot import config.json
+        // e.g. croncord status, croncord list, croncord start, croncord import config.json
         const res = await dispatchCommand(args);
         console.log(res.output);
         process.exit(res.success ? 0 : 1);

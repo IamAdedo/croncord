@@ -8,6 +8,11 @@ const CliEngine = require('./src/cliEngine');
 const { VERSION, DISPLAY_VERSION } = require('./src/version');
 
 const { validateConfigSchema } = require('./src/schemaValidator');
+const { analyzeServerScheduleConflicts } = require('./src/scheduleConflicts');
+const { getUpcomingRuns } = require('./src/upcoming');
+const configBackups = require('./src/configBackups');
+const suppression = require('./src/suppression');
+const { validatePool } = require('./src/messageTemplates');
 
 const app = express();
 
@@ -27,6 +32,8 @@ if (fs.existsSync(CONFIG_FILE_PATH)) {
             clearTimeout(configWatchDebounce);
             configWatchDebounce = setTimeout(() => {
                 daemonManager.reloadConfigFromDisk();
+                // Pick up heartbeat arm/disarm made from the CLI without a restart.
+                try { restartHeartbeatTimer(); } catch (e) { /* non-fatal */ }
             }, 300);
         }
     });
@@ -80,10 +87,201 @@ app.get('/api/status', (req, res) => {
 // Dedicated global version endpoint
 app.get('/api/version', (req, res) => {
     res.json({
-        app: 'AttendanceBot',
+        app: 'Croncord',
         version: VERSION,
         displayVersion: DISPLAY_VERSION
     });
+});
+
+// Lightweight health probe for external monitors (cheap: no history recompute)
+app.get('/api/health', (req, res) => {
+    const daemonStatus = daemonManager.status;
+    res.json({
+        ok: true,
+        app: 'Croncord',
+        version: VERSION,
+        time: new Date().toISOString(),
+        daemon: daemonStatus,
+        uptime: daemonManager.startedAt ? Math.floor((Date.now() - daemonManager.startedAt) / 1000) : 0,
+        activeJobs: daemonManager.activeJobs.length,
+        servers: (daemonManager.getConfig().servers || []).length,
+    });
+});
+
+// --- Heartbeat pings (optional external monitoring) ---
+const heartbeatState = { lastPingAt: null, lastStatus: null, lastError: null, timer: null };
+
+function heartbeatPayload() {
+    return {
+        app: 'croncord',
+        version: VERSION,
+        status: daemonManager.status,
+        uptime: daemonManager.startedAt ? Math.floor((Date.now() - daemonManager.startedAt) / 1000) : 0,
+        activeJobs: daemonManager.activeJobs.length,
+        time: new Date().toISOString(),
+    };
+}
+
+function sendHeartbeatPing(targetUrl) {
+    return new Promise((resolve) => {
+        let url;
+        try {
+            url = new URL(targetUrl);
+        } catch (e) {
+            return resolve({ ok: false, error: 'Invalid heartbeat URL.' });
+        }
+        const payload = heartbeatPayload();
+        Object.keys(payload).forEach((k) => url.searchParams.set(k, String(payload[k])));
+        const lib = url.protocol === 'https:' ? require('https') : require('http');
+        const req = lib.get(url, { timeout: 8000 }, (res) => {
+            const ok = res.statusCode >= 200 && res.statusCode < 300;
+            res.resume();
+            resolve({ ok, statusCode: res.statusCode });
+        });
+        req.on('error', (err) => resolve({ ok: false, error: err.message }));
+        req.on('timeout', () => {
+            req.destroy();
+            resolve({ ok: false, error: 'Heartbeat ping timed out.' });
+        });
+    });
+}
+
+async function runHeartbeatOnce(reason = 'scheduled') {
+    const config = daemonManager.getConfig();
+    const hb = config.heartbeat;
+    if (!hb || !hb.url) return { ok: false, error: 'Heartbeat not configured.' };
+    const result = await sendHeartbeatPing(hb.url);
+    heartbeatState.lastPingAt = new Date().toISOString();
+    heartbeatState.lastStatus = result.ok ? `ok (${reason})` : `failed: ${result.error || ('HTTP ' + result.statusCode)}`;
+    heartbeatState.lastError = result.ok ? null : (result.error || String(result.statusCode));
+    if (result.ok) {
+        logger.info(`Heartbeat ping delivered (${reason}).`);
+    } else {
+        logger.warn(`Heartbeat ping failed (${reason}): ${heartbeatState.lastError}`);
+    }
+    return { ok: result.ok, ...heartbeatState };
+}
+
+function restartHeartbeatTimer() {
+    if (heartbeatState.timer) {
+        clearInterval(heartbeatState.timer);
+        heartbeatState.timer = null;
+    }
+    const config = daemonManager.getConfig();
+    const hb = config.heartbeat;
+    if (!hb || !hb.url) return;
+    const minutes = Math.min(Math.max(parseInt(hb.intervalMinutes, 10) || 15, 1), 1440);
+    heartbeatState.timer = setInterval(() => {
+        runHeartbeatOnce('scheduled');
+    }, minutes * 60 * 1000);
+    if (heartbeatState.timer.unref) heartbeatState.timer.unref();
+    logger.info(`Heartbeat armed: ping ${hb.url} every ${minutes}m.`);
+}
+
+app.get('/api/heartbeat', (req, res) => {
+    const config = daemonManager.getConfig();
+    res.json({ success: true, heartbeat: config.heartbeat || null, state: { ...heartbeatState, timer: undefined } });
+});
+
+app.post('/api/heartbeat', (req, res) => {
+    const { url, intervalMinutes } = req.body || {};
+    if (!url || typeof url !== 'string') {
+        return res.status(400).json({ error: 'Heartbeat "url" is required.' });
+    }
+    let parsed;
+    try {
+        parsed = new URL(url.trim());
+    } catch (e) {
+        return res.status(400).json({ error: 'Heartbeat URL is not a valid URL.' });
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        return res.status(400).json({ error: 'Heartbeat URL must be http(s).' });
+    }
+    const minutes = Math.min(Math.max(parseInt(intervalMinutes, 10) || 15, 1), 1440);
+    const config = daemonManager.getConfig();
+    config.heartbeat = { url: url.trim(), intervalMinutes: minutes };
+    daemonManager.saveConfig(config);
+    restartHeartbeatTimer();
+    logger.success(`Heartbeat configured: ${url.trim()} every ${minutes}m.`);
+    res.status(201).json({ success: true, heartbeat: config.heartbeat });
+});
+
+app.post('/api/heartbeat/test', async (req, res) => {
+    const { url } = req.body || {};
+    const target = (url && String(url).trim()) || (daemonManager.getConfig().heartbeat || {}).url;
+    if (!target) {
+        return res.status(400).json({ error: 'No heartbeat URL configured. Provide one or save it first.' });
+    }
+    const result = await sendHeartbeatPing(target);
+    if (result.ok) {
+        heartbeatState.lastPingAt = new Date().toISOString();
+        heartbeatState.lastStatus = 'ok (manual test)';
+        heartbeatState.lastError = null;
+    }
+    res.json({ success: result.ok, ...result, at: heartbeatState.lastPingAt });
+});
+
+// Weekly digest: auto-posted stats summary + manual controls
+const DIGEST_DAYS_API = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+
+app.get('/api/digest', (req, res) => {
+    const config = daemonManager.getConfig();
+    const summary = attendanceHistory.getWeeklyDigest(7, config.servers || []);
+    res.json({ success: true, digest: config.digest || { enabled: false }, summary });
+});
+
+app.post('/api/digest', (req, res) => {
+    const { enabled, day, time } = req.body || {};
+    const config = daemonManager.getConfig();
+    if (enabled === false) {
+        config.digest = { ...(config.digest || {}), enabled: false };
+        daemonManager.saveConfig(config);
+        logger.info('Weekly digest disabled via Web Dashboard.');
+        return res.json({ success: true, digest: config.digest });
+    }
+    const useDay = String(day || (config.digest || {}).day || 'monday').toLowerCase();
+    const useTime = String(time || (config.digest || {}).time || '09:00');
+    if (!DIGEST_DAYS_API.includes(useDay)) {
+        return res.status(400).json({ error: `Unknown day "${day}". Use: ${DIGEST_DAYS_API.join(', ')}` });
+    }
+    if (suppression.parseHHMM(useTime) === null) {
+        return res.status(400).json({ error: 'Time must be HH:MM (24h), e.g. 09:00.' });
+    }
+    config.digest = { enabled: true, day: useDay, time: useTime };
+    daemonManager.saveConfig(config);
+    logger.success(`Weekly digest enabled: every ${useDay} at ${useTime}.`);
+    res.status(201).json({ success: true, digest: config.digest });
+});
+
+app.delete('/api/digest', (req, res) => {
+    const config = daemonManager.getConfig();
+    config.digest = { ...(config.digest || {}), enabled: false };
+    daemonManager.saveConfig(config);
+    logger.info('Weekly digest disabled via Web Dashboard.');
+    res.json({ success: true });
+});
+
+app.post('/api/digest/test', async (req, res) => {
+    try {
+        const result = await daemonManager.sendDigest(true);
+        res.json(result);
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+app.delete('/api/heartbeat', (req, res) => {    const config = daemonManager.getConfig();
+    config.heartbeat = null;
+    daemonManager.saveConfig(config);
+    if (heartbeatState.timer) {
+        clearInterval(heartbeatState.timer);
+        heartbeatState.timer = null;
+    }
+    heartbeatState.lastPingAt = null;
+    heartbeatState.lastStatus = null;
+    heartbeatState.lastError = null;
+    logger.info('Heartbeat disarmed.');
+    res.json({ success: true });
 });
 
 // Get current config
@@ -105,11 +303,37 @@ app.get('/api/config', (req, res) => {
 // Save whole config or update global settings
 app.post('/api/config', (req, res) => {
     const current = daemonManager.getConfig();
-    const { globalToken, globalWebhookUrl, servers } = req.body;
+    const { globalToken, globalWebhookUrl, servers, globalQuietHours, globalHolidays } = req.body;
 
     if (globalToken !== undefined) current.globalToken = globalToken.trim();
     if (globalWebhookUrl !== undefined) current.globalWebhookUrl = globalWebhookUrl.trim();
     if (Array.isArray(servers)) current.servers = servers;
+
+    if (globalQuietHours !== undefined) {
+        if (globalQuietHours === null) {
+            current.globalQuietHours = null;
+        } else {
+            const check = suppression.validateQuietHours(globalQuietHours);
+            if (!check.valid) return res.status(400).json({ error: check.error });
+            current.globalQuietHours = { start: String(globalQuietHours.start).trim(), end: String(globalQuietHours.end).trim() };
+        }
+    }
+
+    if (globalHolidays !== undefined) {
+        if (!Array.isArray(globalHolidays)) {
+            return res.status(400).json({ error: '"globalHolidays" must be an array of { date, name } entries.' });
+        }
+        const cleaned = [];
+        const seen = new Set();
+        for (const h of globalHolidays) {
+            const check = suppression.validateHoliday(h);
+            if (!check.valid) return res.status(400).json({ error: check.error });
+            if (seen.has(check.sanitized.date)) continue;
+            seen.add(check.sanitized.date);
+            cleaned.push(check.sanitized);
+        }
+        current.globalHolidays = cleaned;
+    }
 
     const saved = daemonManager.saveConfig(current);
     if (!saved) {
@@ -155,15 +379,20 @@ app.post('/api/servers/toggle-all', (req, res) => {
 app.get('/api/config/export', (req, res) => {
     const config = daemonManager.getConfig();
     const exportData = {
-        app: 'AttendanceBot',
+            app: 'Croncord',
         version: VERSION,
         exportedAt: new Date().toISOString(),
         globalWebhookUrl: config.globalWebhookUrl || '',
+        ...(config.globalQuietHours ? { globalQuietHours: config.globalQuietHours } : {}),
+        ...((config.globalHolidays || []).length > 0 ? { globalHolidays: config.globalHolidays } : {}),
+        ...(config.vacation ? { vacation: config.vacation } : {}),
+        ...(config.heartbeat ? { heartbeat: config.heartbeat } : {}),
+        ...(config.digest ? { digest: config.digest } : {}),
         servers: config.servers || [],
     };
 
     res.setHeader('Content-Type', 'application/json');
-    res.setHeader('Content-Disposition', 'attachment; filename="attendancebot-servers-config.json"');
+    res.setHeader('Content-Disposition', 'attachment; filename="croncord-servers-config.json"');
     res.json(exportData);
 });
 
@@ -214,6 +443,25 @@ app.post('/api/config/import', (req, res) => {
     const importedWebhook = globalWebhookUrl || validation.sanitized.globalWebhookUrl;
     if (importedWebhook && !config.globalWebhookUrl) {
         config.globalWebhookUrl = importedWebhook.trim();
+    }
+
+    // Carry validated quiet hours + holidays + vacation from the import when present.
+    if (validation.sanitized.globalQuietHours) {
+        config.globalQuietHours = validation.sanitized.globalQuietHours;
+    }
+    if (validation.sanitized.globalHolidays && validation.sanitized.globalHolidays.length > 0) {
+        const merged = new Map((config.globalHolidays || []).map((h) => [h.date, h]));
+        validation.sanitized.globalHolidays.forEach((h) => merged.set(h.date, h));
+        config.globalHolidays = [...merged.values()].sort((a, b) => String(a.date).localeCompare(String(b.date)));
+    }
+    if (validation.sanitized.vacation) {
+        config.vacation = validation.sanitized.vacation;
+    }
+    if (validation.sanitized.heartbeat) {
+        config.heartbeat = validation.sanitized.heartbeat;
+    }
+    if (validation.sanitized.digest) {
+        config.digest = validation.sanitized.digest;
     }
 
     const saved = daemonManager.saveConfig(config);
@@ -290,7 +538,7 @@ app.post('/api/servers', (req, res) => {
 // Update a Server Profile
 app.put('/api/servers/:serverId', (req, res) => {
     const { serverId } = req.params;
-    const { name, channelId, webhookUrl, active } = req.body;
+    const { name, channelId, webhookUrl, active, quietHours, ignoreHolidays } = req.body;
     const config = daemonManager.getConfig();
     const server = config.servers.find((s) => String(s.id) === String(serverId));
 
@@ -302,6 +550,16 @@ app.put('/api/servers/:serverId', (req, res) => {
     if (channelId !== undefined) server.channelId = channelId.trim();
     if (webhookUrl !== undefined) server.webhookUrl = (webhookUrl || '').trim();
     if (active !== undefined) server.active = Boolean(active);
+    if (ignoreHolidays !== undefined) server.ignoreHolidays = Boolean(ignoreHolidays);
+    if (quietHours !== undefined) {
+        if (quietHours === null) {
+            delete server.quietHours;
+        } else {
+            const check = suppression.validateQuietHours(quietHours);
+            if (!check.valid) return res.status(400).json({ error: check.error });
+            server.quietHours = { start: String(quietHours.start).trim(), end: String(quietHours.end).trim() };
+        }
+    }
 
     daemonManager.saveConfig(config);
     logger.info(`Updated server profile: "${server.name}"`);
@@ -360,10 +618,23 @@ app.post('/api/servers/bulk-action', (req, res) => {
     return res.status(400).json({ error: `Unknown bulk action: ${action}` });
 });
 
+function withConflictWarnings(server) {
+    try {
+        const analysis = analyzeServerScheduleConflicts(server);
+        return {
+            hasConflict: analysis.hasConflict,
+            conflicts: analysis.conflicts,
+            conflictingScheduleIds: analysis.conflictingScheduleIds,
+        };
+    } catch (e) {
+        return { hasConflict: false, conflicts: [], conflictingScheduleIds: [] };
+    }
+}
+
 // Add a Schedule to a Server
 app.post('/api/servers/:serverId/schedules', (req, res) => {
     const { serverId } = req.params;
-    const { label, cron, message, attendanceType, emoji, targetMessageId, maxJitterMinutes, active, type, runDate } = req.body;
+    const { label, cron, message, messagePool, attendanceType, emoji, targetMessageId, maxJitterMinutes, active, type, runDate } = req.body;
 
     if (!cron || !label) {
         return res.status(400).json({ error: 'Label and cron expression are required' });
@@ -375,11 +646,19 @@ app.post('/api/servers/:serverId/schedules', (req, res) => {
         return res.status(404).json({ error: 'Server not found' });
     }
 
+    let pool = [];
+    if (messagePool !== undefined && messagePool !== null) {
+        const check = validatePool(messagePool);
+        if (!check.valid) return res.status(400).json({ error: check.error });
+        pool = check.sanitized;
+    }
+
     const newSchedule = {
         id: Date.now().toString() + Math.floor(Math.random() * 1000),
         label: label.trim(),
         cron: cron.trim(),
         message: message !== undefined ? message : 'Present',
+        messagePool: pool,
         attendanceType: (attendanceType || 'MESSAGE').toUpperCase(),
         emoji: emoji || '👍',
         targetMessageId: targetMessageId ? targetMessageId.trim() : '',
@@ -397,7 +676,7 @@ app.post('/api/servers/:serverId/schedules', (req, res) => {
 
     daemonManager.saveConfig(config);
     logger.success(`[${server.name}] Added schedule: "${newSchedule.label}"`);
-    res.status(201).json({ success: true, schedule: newSchedule });
+    res.status(201).json({ success: true, schedule: newSchedule, conflicts: withConflictWarnings(server) });
 });
 
 // Update a Schedule
@@ -414,11 +693,20 @@ app.put('/api/servers/:serverId/schedules/:scheduleId', (req, res) => {
         return res.status(404).json({ error: 'Schedule not found' });
     }
 
-    const { label, cron, message, attendanceType, emoji, targetMessageId, maxJitterMinutes, active, type, runDate } = req.body;
+    const { label, cron, message, messagePool, attendanceType, emoji, targetMessageId, maxJitterMinutes, active, type, runDate } = req.body;
 
     if (label !== undefined) schedule.label = label.trim();
     if (cron !== undefined) schedule.cron = cron.trim();
     if (message !== undefined) schedule.message = message;
+    if (messagePool !== undefined) {
+        if (messagePool === null) {
+            schedule.messagePool = [];
+        } else {
+            const check = validatePool(messagePool);
+            if (!check.valid) return res.status(400).json({ error: check.error });
+            schedule.messagePool = check.sanitized;
+        }
+    }
     if (attendanceType !== undefined) schedule.attendanceType = attendanceType.toUpperCase();
     if (emoji !== undefined) schedule.emoji = emoji;
     if (targetMessageId !== undefined) schedule.targetMessageId = targetMessageId ? targetMessageId.trim() : '';
@@ -429,7 +717,7 @@ app.put('/api/servers/:serverId/schedules/:scheduleId', (req, res) => {
 
     daemonManager.saveConfig(config);
     logger.info(`[${server.name}] Updated schedule: "${schedule.label}"`);
-    res.json({ success: true, schedule });
+    res.json({ success: true, schedule, conflicts: withConflictWarnings(server) });
 });
 
 // Delete a Schedule
@@ -492,7 +780,247 @@ app.post('/api/servers/:serverId/schedules/reorder', (req, res) => {
     }
 
     logger.info(`[${server.name}] Attendance schedules reordered for prioritized execution sequence.`);
-    res.json({ success: true, server, schedules: server.schedules });
+    res.json({ success: true, server, schedules: server.schedules, conflicts: withConflictWarnings(server) });
+});
+
+// Schedule conflict analysis for a server (mirrors the dashboard's 5-minute rule)
+app.get('/api/servers/:serverId/conflicts', (req, res) => {
+    const { serverId } = req.params;
+    const config = daemonManager.getConfig();
+    const server = (config.servers || []).find((s) => String(s.id) === String(serverId));
+    if (!server) {
+        return res.status(404).json({ error: 'Server not found' });
+    }
+    const analysis = withConflictWarnings(server);
+    res.json({ success: true, serverId: server.id, serverName: server.name, ...analysis });
+});
+
+// Monthly firing calendar across all servers
+app.get('/api/schedules/calendar', (req, res) => {
+    try {
+        const monthParam = String(req.query.month || '').trim();
+        let year, month;
+        if (/^\d{4}-\d{2}$/.test(monthParam)) {
+            year = parseInt(monthParam.slice(0, 4), 10);
+            month = parseInt(monthParam.slice(5, 7), 10);
+            if (month < 1 || month > 12) throw new Error('bad month');
+        } else if (!monthParam) {
+            const now = new Date();
+            year = now.getFullYear();
+            month = now.getMonth() + 1;
+        } else {
+            return res.status(400).json({ error: 'month must be YYYY-MM (e.g. 2026-10).' });
+        }
+        const { getCalendarMonth } = require('./src/upcoming');
+        res.json({ success: true, ...getCalendarMonth(daemonManager.getConfig(), year, month) });
+    } catch (err) {
+        logger.error(`Error in /api/schedules/calendar: ${err.message}`);
+        res.status(500).json({ error: 'Failed to compute calendar', details: err.message });
+    }
+});
+
+// Upcoming-runs timeline across all servers
+app.get('/api/schedules/upcoming', (req, res) => {
+    try {
+        const count = Math.min(Math.max(parseInt(req.query.count, 10) || 10, 1), 50);
+        const config = daemonManager.getConfig();
+        res.json({ success: true, ...getUpcomingRuns(config, { count }) });
+    } catch (err) {
+        logger.error(`Error in /api/schedules/upcoming: ${err.message}`);
+        res.status(500).json({ error: 'Failed to compute upcoming runs', details: err.message });
+    }
+});
+
+// Config restore points (auto snapshots)
+app.get('/api/config/backups', (req, res) => {
+    res.json({ success: true, backups: configBackups.listBackups() });
+});
+
+app.post('/api/config/restore', (req, res) => {
+    const { file } = req.body || {};
+    if (!file) {
+        return res.status(400).json({ error: 'Restore "file" name is required.' });
+    }
+    let snapshot;
+    try {
+        snapshot = configBackups.readBackup(file);
+    } catch (err) {
+        return res.status(404).json({ error: err.message });
+    }
+    if (!snapshot || !Array.isArray(snapshot.servers)) {
+        return res.status(400).json({ error: 'Restore point is not a valid config (missing servers array).' });
+    }
+    const saved = daemonManager.saveConfig(snapshot);
+    if (!saved) {
+        return res.status(500).json({ error: 'Failed to write restored configuration.' });
+    }
+    if (daemonManager.status === 'RUNNING') {
+        daemonManager.initializeSchedules(snapshot);
+    }
+    logger.success(`Configuration restored from "${file}" via Web Dashboard.`);
+    res.json({ success: true, file, servers: snapshot.servers });
+});
+
+// Quiet hours: view / set global / clear everywhere
+app.get('/api/quiet', (req, res) => {
+    const config = daemonManager.getConfig();
+    const perServer = (config.servers || [])
+        .filter((s) => s.quietHours)
+        .map((s) => ({ serverId: s.id, serverName: s.name, quietHours: s.quietHours }));
+    res.json({ success: true, global: config.globalQuietHours || null, perServer });
+});
+
+app.post('/api/quiet', (req, res) => {
+    const { start, end } = req.body || {};
+    const check = suppression.validateQuietHours({ start, end });
+    if (!check.valid) {
+        return res.status(400).json({ error: check.error });
+    }
+    const config = daemonManager.getConfig();
+    config.globalQuietHours = { start: String(start).trim(), end: String(end).trim() };
+    daemonManager.saveConfig(config);
+    logger.info(`Global quiet hours set to ${config.globalQuietHours.start}–${config.globalQuietHours.end} via Web Dashboard.`);
+    res.json({ success: true, global: config.globalQuietHours });
+});
+
+app.delete('/api/quiet', (req, res) => {
+    const config = daemonManager.getConfig();
+    config.globalQuietHours = null;
+    (config.servers || []).forEach((s) => { delete s.quietHours; });
+    daemonManager.saveConfig(config);
+    logger.info('Quiet hours cleared everywhere via Web Dashboard.');
+    res.json({ success: true });
+});
+
+// Named holidays: list / add / remove
+app.get('/api/holidays', (req, res) => {
+    const config = daemonManager.getConfig();
+    const holidays = [...(config.globalHolidays || [])].sort((a, b) => String(a.date).localeCompare(String(b.date)));
+    res.json({ success: true, holidays });
+});
+
+app.post('/api/holidays', (req, res) => {
+    const { date, name } = req.body || {};
+    const check = suppression.validateHoliday({ date, name });
+    if (!check.valid) {
+        return res.status(400).json({ error: check.error });
+    }
+    const config = daemonManager.getConfig();
+    if (!Array.isArray(config.globalHolidays)) config.globalHolidays = [];
+    if (config.globalHolidays.some((h) => suppression.normalizeDateKey(h.date) === check.sanitized.date)) {
+        return res.status(409).json({ error: `${check.sanitized.date} is already a holiday. Remove it first to rename.` });
+    }
+    config.globalHolidays.push(check.sanitized);
+    daemonManager.saveConfig(config);
+    logger.success(`Holiday added: ${check.sanitized.date} — ${check.sanitized.name}.`);
+    res.status(201).json({ success: true, holiday: check.sanitized });
+});
+
+app.delete('/api/holidays/:date', (req, res) => {
+    const key = suppression.normalizeDateKey(req.params.date);
+    if (!key) {
+        return res.status(400).json({ error: 'Holiday date must be YYYY-MM-DD.' });
+    }
+    const config = daemonManager.getConfig();
+    const before = (config.globalHolidays || []).length;
+    config.globalHolidays = (config.globalHolidays || []).filter((h) => suppression.normalizeDateKey(h.date) !== key);
+    if (config.globalHolidays.length === before) {
+        return res.status(404).json({ error: `No holiday found on ${key}.` });
+    }
+    daemonManager.saveConfig(config);
+    logger.warn(`Holiday on ${key} removed via Web Dashboard.`);
+    res.json({ success: true, date: key });
+});
+
+// Duplicate a server profile with fresh IDs (templating shortcut)
+app.post('/api/servers/:serverId/clone', (req, res) => {
+    const { serverId } = req.params;
+    const { name, channelId } = req.body || {};
+    if (!name || !channelId) {
+        return res.status(400).json({ error: 'Clone target "name" and "channelId" are required.' });
+    }
+    const config = daemonManager.getConfig();
+    const src = (config.servers || []).find((s) => String(s.id) === String(serverId));
+    if (!src) {
+        return res.status(404).json({ error: 'Server not found' });
+    }
+    const cleanChan = String(channelId).trim();
+    const dupe = (config.servers || []).find((s) => s.channelId && s.channelId.trim() === cleanChan);
+    if (dupe) {
+        return res.status(409).json({ error: `Channel ${cleanChan} is already used by "${dupe.name}".`, duplicate: true });
+    }
+    const stamp = Date.now().toString();
+    const cloned = {
+        id: stamp,
+        name: String(name).trim(),
+        channelId: cleanChan,
+        webhookUrl: src.webhookUrl || '',
+        active: Boolean(src.active),
+        ignoreHolidays: Boolean(src.ignoreHolidays),
+        ...(src.quietHours ? { quietHours: { ...src.quietHours } } : {}),
+        schedules: (src.schedules || []).map((sc, i) => ({
+            ...JSON.parse(JSON.stringify(sc)),
+            id: `${stamp}_${i}`,
+        })),
+    };
+    config.servers.push(cloned);
+    daemonManager.saveConfig(config);
+    logger.success(`Cloned server profile "${src.name}" → "${cloned.name}".`);
+    res.status(201).json({ success: true, server: cloned });
+});
+
+// Bulk enable/disable every schedule on one server
+app.post('/api/servers/:serverId/schedules/bulk-action', (req, res) => {
+    const { serverId } = req.params;
+    const { action } = req.body || {};
+    if (action !== 'enable' && action !== 'disable') {
+        return res.status(400).json({ error: 'Bulk action must be "enable" or "disable".' });
+    }
+    const config = daemonManager.getConfig();
+    const server = (config.servers || []).find((s) => String(s.id) === String(serverId));
+    if (!server) {
+        return res.status(404).json({ error: 'Server not found' });
+    }
+    const enable = (action === 'enable');
+    (server.schedules || []).forEach((sc) => { sc.active = enable; });
+    daemonManager.saveConfig(config);
+    logger.info(`[${server.name}] Bulk ${enable ? 'enabled' : 'paused'} ${(server.schedules || []).length} schedule(s).`);
+    res.json({ success: true, action, count: (server.schedules || []).length, schedules: server.schedules });
+});
+
+// Vacation mode: pause everything until a date (auto-resumes after)
+app.get('/api/vacation', (req, res) => {
+    const config = daemonManager.getConfig();
+    const st = suppression.vacationStatus(config.vacation, new Date());
+    res.json({ success: true, vacation: config.vacation || null, ...st });
+});
+
+app.post('/api/vacation', (req, res) => {
+    const { until, note } = req.body || {};
+    const check = suppression.validateVacation({ until, note });
+    if (!check.valid) {
+        return res.status(400).json({ error: check.error });
+    }
+    const todayKey = suppression.normalizeDateKey(new Date());
+    if (check.sanitized.until < todayKey) {
+        return res.status(400).json({ error: `Vacation end date ${check.sanitized.until} is in the past.` });
+    }
+    const config = daemonManager.getConfig();
+    config.vacation = { ...check.sanitized, armedAt: new Date().toISOString() };
+    daemonManager.saveConfig(config);
+    logger.success(`Vacation mode armed until ${check.sanitized.until} via Web Dashboard.`);
+    res.status(201).json({ success: true, vacation: config.vacation });
+});
+
+app.delete('/api/vacation', (req, res) => {
+    const config = daemonManager.getConfig();
+    if (!config.vacation) {
+        return res.json({ success: true, message: 'Vacation mode is already off.' });
+    }
+    config.vacation = null;
+    daemonManager.saveConfig(config);
+    logger.info('Vacation cancelled via Web Dashboard — schedules resumed.');
+    res.json({ success: true });
 });
 
 // Test Webhook Dispatch
@@ -525,6 +1053,21 @@ app.post('/api/servers/:serverId/schedules/:scheduleId/trigger', async (req, res
     }
 });
 
+// Dry-run preview: resolved post text for a schedule (sends nothing, logs nothing)
+app.get('/api/servers/:serverId/schedules/:scheduleId/preview', (req, res) => {
+    const { serverId, scheduleId } = req.params;
+    const config = daemonManager.getConfig();
+    const server = (config.servers || []).find((s) => String(s.id) === String(serverId));
+    if (!server) {
+        return res.status(404).json({ error: 'Server not found' });
+    }
+    const schedule = (server.schedules || []).find((sc) => String(sc.id) === String(scheduleId));
+    if (!schedule) {
+        return res.status(404).json({ error: 'Schedule not found' });
+    }
+    res.json({ success: true, preview: cliEngine.buildPreview(server, schedule, new Date()) });
+});
+
 // Activity Logs Endpoint
 app.get('/api/logs', (req, res) => {
     res.json({ logs: logger.getHistory() });
@@ -549,7 +1092,7 @@ app.get('/api/logs/export', (req, res) => {
 
     const csvContent = '\uFEFF' + [header.join(','), ...rows].join('\r\n');
     const timestamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
-    const filename = `attendancebot-activity-logs-${timestamp}.csv`;
+    const filename = `croncord-activity-logs-${timestamp}.csv`;
 
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -641,9 +1184,11 @@ app.use((req, res) => {
 });
 
 // Start Express Server
-// 1. Primary Base Port 3271 (Dedicated AttendanceBot Dashboard & CLI sync port)
+// 1. Primary Base Port 3271 (Dedicated Croncord Dashboard & CLI sync port)
 const server = app.listen(PORT, HOST, () => {
-    logger.success(`AttendanceBot Web Dashboard online and live on primary base port http://${HOST}:${PORT}`);
+    logger.success(`Croncord Web Dashboard online and live on primary base port http://${HOST}:${PORT}`);
+    // Arm the heartbeat monitor if one is configured (survives reboots via config).
+    try { restartHeartbeatTimer(); } catch (e) { /* non-fatal */ }
 });
 
 server.on('error', (err) => {

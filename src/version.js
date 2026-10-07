@@ -1,7 +1,7 @@
 /**
  * src/version.js
  *
- * Single Source of Truth for AttendanceBot Application Version.
+ * Single Source of Truth for Croncord Application Version.
  * Dynamically resolves the global version from package.json so bumping
  * "version" in package.json propagates instantly across the Web Dashboard,
  * REST API endpoints, CLI menus, JSON schema validators, and export payloads.

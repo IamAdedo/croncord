@@ -3,15 +3,15 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AttendanceBot</title>
+  <title>Croncord</title>
   <meta name="description" content="Multi-server Discord daily attendance background daemon and web management dashboard." />
-  <meta property="og:title" content="AttendanceBot" />
+  <meta property="og:title" content="Croncord" />
   <meta property="og:description" content="Multi-server Discord daily attendance background daemon and web management dashboard." />
   <!-- Theme Early Initializer (Prevents FOUC) -->
   <script>
     (function() {
       try {
-        const savedTheme = localStorage.getItem('attendancebot_theme');
+        const savedTheme = localStorage.getItem('croncord_theme') || localStorage.getItem('attendancebot_theme');
         if (savedTheme === 'light') {
           document.documentElement.classList.add('light');
           document.documentElement.classList.remove('dark');
@@ -783,7 +783,7 @@
         </div>
         <div>
           <div class="flex items-center space-x-2">
-            <h1 class="font-black text-lg text-white tracking-wide">AttendanceBot</h1>
+            <h1 class="font-black text-lg text-white tracking-wide">Croncord</h1>
             <span id="appHeaderVersionBadge" class="global-app-version text-xs px-2 py-0.5 rounded-full bg-discord-blurple/20 text-indigo-300 font-semibold border border-discord-blurple/30">{{APP_VERSION}}</span>
           </div>
           <p class="text-xs text-discord-muted">By IamAdedo, dlazyHNTR • Discord Multi-Server Automation</p>
@@ -876,6 +876,93 @@
         <div class="w-10 h-10 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-400 flex items-center justify-center text-lg">
           <i class="fa-solid fa-bell"></i>
         </div>
+      </div>
+    </div>
+
+    <!-- UPCOMING RUNS TIMELINE -->
+    <div class="bg-discord-dark rounded-xl border border-discord-border p-4 sm:p-5 shadow-sm">
+      <div class="flex items-center justify-between gap-3 flex-wrap">
+        <div class="flex items-center space-x-3">
+          <div class="w-10 h-10 rounded-xl bg-violet-500/10 border border-violet-500/25 text-violet-400 flex items-center justify-center text-lg shrink-0">
+            <i class="fa-solid fa-wand-magic-sparkles"></i>
+          </div>
+          <div>
+            <h3 class="text-base font-bold text-white">Upcoming Runs</h3>
+            <p class="text-xs text-discord-muted mt-0.5">Next real fire times across all servers. Holidays excluded · quiet-hour hits flagged.</p>
+          </div>
+        </div>
+        <button onclick="loadUpcoming()" class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-discord-card hover:bg-discord-border text-discord-text border border-discord-border transition cursor-pointer" title="Refresh upcoming runs">
+          <i class="fa-solid fa-arrows-rotate mr-1"></i> Refresh
+        </button>
+      </div>
+      <div id="upcomingList" class="mt-3 space-y-1.5 text-xs">
+        <p class="text-discord-muted">Loading upcoming runs...</p>
+      </div>
+
+      <div class="mt-4 pt-3 border-t border-discord-border/60">
+        <div class="flex items-center justify-between gap-2 flex-wrap mb-2">
+          <p class="text-xs font-semibold uppercase tracking-wider text-discord-muted"><i class="fa-solid fa-calendar-days mr-1 text-violet-400"></i>Monthly firing calendar</p>
+          <div class="flex items-center gap-1.5">
+            <button onclick="shiftCalendarMonth(-1)" class="px-2 py-1 rounded-lg text-xs bg-discord-card hover:bg-discord-border text-discord-text border border-discord-border transition cursor-pointer" title="Previous month"><i class="fa-solid fa-chevron-left"></i></button>
+            <span id="calendarMonthLabel" class="text-xs font-bold text-white mono min-w-24 text-center">—</span>
+            <button onclick="shiftCalendarMonth(1)" class="px-2 py-1 rounded-lg text-xs bg-discord-card hover:bg-discord-border text-discord-text border border-discord-border transition cursor-pointer" title="Next month"><i class="fa-solid fa-chevron-right"></i></button>
+          </div>
+        </div>
+        <div id="calendarGrid" class="grid grid-cols-7 gap-1 text-xs">
+          <p class="text-discord-muted col-span-7">Loading calendar...</p>
+        </div>
+        <div id="calendarDayDetail" class="mt-2 space-y-1 text-xs"></div>
+      </div>
+    </div>
+
+    <!-- HEARTBEAT MONITOR -->
+    <div class="bg-discord-dark rounded-xl border border-discord-border p-4 sm:p-5 shadow-sm">
+      <div class="flex items-center space-x-3">
+        <div class="w-10 h-10 rounded-xl bg-rose-500/10 border border-rose-500/25 text-rose-400 flex items-center justify-center text-lg shrink-0">
+          <i class="fa-solid fa-heart-pulse"></i>
+        </div>
+        <div>
+          <h3 class="text-base font-bold text-white">Heartbeat Monitor</h3>
+          <p class="text-xs text-discord-muted mt-0.5">Ping an external monitor (e.g. healthchecks.io) so silent outages get noticed.</p>
+        </div>
+      </div>
+      <p id="heartbeatStatusText" class="mt-3 text-xs text-discord-muted">Loading heartbeat state...</p>
+      <div class="mt-2 flex flex-col sm:flex-row gap-2">
+        <input type="url" id="heartbeatUrlInput" placeholder="https://hc-ping.com/your-uuid" class="flex-1 bg-discord-darker border border-discord-border rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-discord-blurple mono" />
+        <input type="number" id="heartbeatMinutesInput" min="1" max="1440" value="15" title="Ping interval in minutes" class="w-24 bg-discord-darker border border-discord-border rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-discord-blurple mono" />
+        <button onclick="saveHeartbeatUI()" class="px-3 py-2 bg-discord-blurple hover:bg-indigo-600 text-white rounded-lg text-xs font-bold transition cursor-pointer whitespace-nowrap">Arm</button>
+        <button onclick="testHeartbeatUI()" class="px-3 py-2 bg-discord-card hover:bg-discord-border border border-discord-border rounded-lg text-xs font-semibold text-white transition cursor-pointer whitespace-nowrap">Test Ping</button>
+        <button onclick="clearHeartbeatUI()" class="px-3 py-2 bg-discord-card hover:bg-discord-border border border-discord-border rounded-lg text-xs font-semibold text-white transition cursor-pointer whitespace-nowrap">Off</button>
+      </div>
+    </div>
+
+    <!-- WEEKLY DIGEST -->
+    <div class="bg-discord-dark rounded-xl border border-discord-border p-4 sm:p-5 shadow-sm">
+      <div class="flex items-center space-x-3">
+        <div class="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-400 flex items-center justify-center text-lg shrink-0">
+          <i class="fa-solid fa-newspaper"></i>
+        </div>
+        <div>
+          <h3 class="text-base font-bold text-white">Weekly Digest</h3>
+          <p class="text-xs text-discord-muted mt-0.5">Auto-posted stats summary to your global webhook. Needs the daemon running.</p>
+        </div>
+      </div>
+      <p id="digestStatusText" class="mt-3 text-xs text-discord-muted">Loading digest state...</p>
+      <div id="digestSummaryBox" class="mt-2 text-xs text-discord-muted"></div>
+      <div class="mt-2 flex flex-col sm:flex-row gap-2">
+        <select id="digestDayInput" class="bg-discord-darker border border-discord-border rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-discord-blurple cursor-pointer">
+          <option value="monday">Monday</option>
+          <option value="tuesday">Tuesday</option>
+          <option value="wednesday">Wednesday</option>
+          <option value="thursday">Thursday</option>
+          <option value="friday">Friday</option>
+          <option value="saturday">Saturday</option>
+          <option value="sunday">Sunday</option>
+        </select>
+        <input type="time" id="digestTimeInput" value="09:00" class="w-32 bg-discord-darker border border-discord-border rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-discord-blurple cursor-pointer" />
+        <button onclick="saveDigestUI()" class="px-3 py-2 bg-discord-blurple hover:bg-indigo-600 text-white rounded-lg text-xs font-bold transition cursor-pointer whitespace-nowrap">Enable</button>
+        <button onclick="testDigestUI()" class="px-3 py-2 bg-discord-card hover:bg-discord-border border border-discord-border rounded-lg text-xs font-semibold text-white transition cursor-pointer whitespace-nowrap">Send Test Now</button>
+        <button onclick="clearDigestUI()" class="px-3 py-2 bg-discord-card hover:bg-discord-border border border-discord-border rounded-lg text-xs font-semibold text-white transition cursor-pointer whitespace-nowrap">Off</button>
       </div>
     </div>
 
@@ -1324,6 +1411,58 @@
         </div>
       </div>
 
+      <!-- HOLIDAYS & QUIET HOURS CARD -->
+      <div class="bg-discord-dark rounded-xl p-6 border border-discord-border space-y-4">
+        <div class="flex items-center space-x-3 border-b border-discord-border/60 pb-3.5">
+          <div class="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/25 text-amber-400 flex items-center justify-center text-lg shrink-0">
+            <i class="fa-solid fa-umbrella-beach"></i>
+          </div>
+          <div>
+            <h3 class="text-base font-bold text-white">Holidays & Quiet Hours</h3>
+            <p class="text-xs text-discord-muted mt-0.5">Intentional skip rules — firings here are recorded neutrally, never as failures.</p>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div class="space-y-2.5">
+            <p class="text-xs font-semibold uppercase tracking-wider text-discord-muted">Named Holidays (skip dates)</p>
+            <div id="holidaysList" class="space-y-1.5 text-xs max-h-44 overflow-y-auto">
+              <p class="text-discord-muted">Loading holidays...</p>
+            </div>
+            <div class="flex flex-col sm:flex-row gap-2">
+              <input type="date" id="holidayDateInput" class="flex-1 bg-discord-darker border border-discord-border rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-discord-blurple cursor-pointer" />
+              <input type="text" id="holidayNameInput" placeholder="Holiday name" class="flex-1 bg-discord-darker border border-discord-border rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-discord-blurple" />
+              <button onclick="addHolidayUI()" class="px-3 py-2 bg-discord-blurple hover:bg-indigo-600 text-white rounded-lg text-xs font-bold transition cursor-pointer whitespace-nowrap">Add</button>
+            </div>
+          </div>
+
+          <div class="space-y-2.5">
+            <p class="text-xs font-semibold uppercase tracking-wider text-discord-muted">Global Quiet Hours (daily window)</p>
+            <div class="flex items-center gap-2">
+              <input type="time" id="quietStartInput" class="flex-1 bg-discord-darker border border-discord-border rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-discord-blurple cursor-pointer" />
+              <span class="text-discord-muted text-xs">to</span>
+              <input type="time" id="quietEndInput" class="flex-1 bg-discord-darker border border-discord-border rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-discord-blurple cursor-pointer" />
+            </div>
+            <p id="quietCurrentText" class="text-xs text-discord-muted">Not set — runs fire at their scheduled times.</p>
+            <div class="flex gap-2">
+              <button onclick="saveQuietUI()" class="px-3 py-2 bg-discord-blurple hover:bg-indigo-600 text-white rounded-lg text-xs font-bold transition cursor-pointer">Save Window</button>
+              <button onclick="clearQuietUI()" class="px-3 py-2 bg-discord-card hover:bg-discord-border border border-discord-border rounded-lg text-xs font-semibold text-white transition cursor-pointer">Clear</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="pt-3 border-t border-discord-border/60 space-y-2.5">
+          <p class="text-xs font-semibold uppercase tracking-wider text-discord-muted">Vacation Mode (pause everything)</p>
+          <p id="vacationStatusText" class="text-xs text-discord-muted">Loading vacation state...</p>
+          <div class="flex flex-col sm:flex-row gap-2">
+            <input type="date" id="vacationUntilInput" class="flex-1 bg-discord-darker border border-discord-border rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-discord-blurple cursor-pointer" />
+            <input type="text" id="vacationNoteInput" placeholder="Note (optional)" class="flex-1 bg-discord-darker border border-discord-border rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-discord-blurple" />
+            <button onclick="armVacationUI()" class="px-3 py-2 bg-discord-blurple hover:bg-indigo-600 text-white rounded-lg text-xs font-bold transition cursor-pointer whitespace-nowrap">Arm Vacation</button>
+            <button onclick="cancelVacationUI()" class="px-3 py-2 bg-discord-card hover:bg-discord-border border border-discord-border rounded-lg text-xs font-semibold text-white transition cursor-pointer whitespace-nowrap">Cancel</button>
+          </div>
+        </div>
+      </div>
+
       <!-- LOCAL AUTO-BACKUP & RECOVERY SETTINGS CARD -->
       <div class="bg-discord-dark rounded-xl p-6 border border-discord-border space-y-4">
         <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-b border-discord-border/60 pb-3.5">
@@ -1384,6 +1523,21 @@
             <button onclick="restoreFromLocalBackup()" class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold shadow transition cursor-pointer">
               <i class="fa-solid fa-rotate-left mr-1"></i> Restore from Auto-Backup
             </button>
+          </div>
+        </div>
+
+        <div class="pt-3 border-t border-discord-border/60 space-y-2">
+          <div class="flex items-center justify-between gap-3 flex-wrap">
+            <p class="text-xs font-semibold uppercase tracking-wider text-discord-muted">
+              <i class="fa-solid fa-server mr-1 text-emerald-400"></i> Server-Side Restore Points
+            </p>
+            <button onclick="loadRestorePointsUI()" class="px-2.5 py-1 rounded-lg text-xs font-semibold bg-discord-card hover:bg-discord-border text-discord-text border border-discord-border transition cursor-pointer" title="Refresh server restore points">
+              <i class="fa-solid fa-arrows-rotate mr-1"></i> Refresh
+            </button>
+          </div>
+          <p class="text-xs text-discord-muted">Snapshots saved automatically on the server before every change (newest 20 kept).</p>
+          <div id="restorePointsList" class="space-y-1.5 text-xs max-h-44 overflow-y-auto">
+            <p class="text-discord-muted">Loading restore points...</p>
           </div>
         </div>
       </div>
@@ -1455,7 +1609,7 @@
       </div>
 
       <div id="logsConsole" class="bg-black/80 border border-discord-border rounded-xl p-4 h-[460px] overflow-y-auto mono text-xs leading-relaxed space-y-1 text-gray-300">
-        <p class="text-discord-muted italic">Connecting to AttendanceBot event stream...</p>
+        <p class="text-discord-muted italic">Connecting to Croncord event stream...</p>
       </div>
     </section>
 
@@ -1475,7 +1629,7 @@
               </span>
             </div>
             <p class="text-xs text-discord-muted mt-1">
-              Manage AttendanceBot via CLI in your browser or through terminal commands (<code class="text-discord-text font-mono bg-discord-card px-1.5 py-0.5 rounded border border-discord-border">npm run cli</code>). Both operate concurrently with the spinning server!
+              Manage Croncord via CLI in your browser or through terminal commands (<code class="text-discord-text font-mono bg-discord-card px-1.5 py-0.5 rounded border border-discord-border">npm run cli</code>). Both operate concurrently with the spinning server!
             </p>
           </div>
 
@@ -1513,7 +1667,7 @@
               <div class="w-3 h-3 rounded-full bg-rose-500/80"></div>
               <div class="w-3 h-3 rounded-full bg-amber-500/80"></div>
               <div class="w-3 h-3 rounded-full bg-emerald-500/80"></div>
-              <span class="text-xs font-mono text-discord-muted ml-2 font-medium">attendancebot@live ~ bash</span>
+              <span class="text-xs font-mono text-discord-muted ml-2 font-medium">croncord@live ~ bash</span>
             </div>
             <div class="flex items-center space-x-2 text-xs relative">
               <!-- CLI Quick Reference Help Popover Button -->
@@ -1605,14 +1759,14 @@
 
           <!-- Terminal Output Area -->
           <div id="cliTerminalOutput" class="p-4 h-[380px] sm:h-[440px] overflow-y-auto mono text-xs leading-relaxed space-y-1 text-zinc-300 select-text whitespace-pre-wrap">
-            <div class="text-emerald-400 font-bold">⚡ AttendanceBot Live CLI Terminal Initialized</div>
+            <div class="text-emerald-400 font-bold">⚡ Croncord Live CLI Terminal Initialized</div>
             <div class="text-zinc-400 text-[11px]">Type <span class="text-discord-blurple font-bold">help</span> to view available commands, or try <span class="text-discord-blurple font-bold">status</span>, <span class="text-discord-blurple font-bold">list</span>, <span class="text-discord-blurple font-bold">trigger &lt;id&gt;</span>.</div>
             <div class="text-zinc-500 text-[11px] pb-2 border-b border-zinc-800">You can also manage from your local shell anytime: <span class="text-amber-300">npm run cli</span> or <span class="text-amber-300">node bin/cli.js status</span>.</div>
           </div>
 
           <!-- Command Prompt Input Line -->
           <form id="cliTerminalForm" onsubmit="handleCliTerminalSubmit(event)" class="rounded-b-xl px-4 py-2.5 bg-discord-darker/95 border-t border-discord-border flex items-center space-x-2 relative">
-            <span class="text-emerald-400 font-mono font-bold text-xs select-none shrink-0 cli-prompt">attendancebot:~$</span>
+            <span class="text-emerald-400 font-mono font-bold text-xs select-none shrink-0 cli-prompt">croncord:~$</span>
             <div class="relative flex-1 flex items-center min-w-0">
               <input
                 type="text"
@@ -1734,7 +1888,7 @@
     <section id="tab-guide" class="tab-content hidden space-y-6">
       <div class="bg-discord-dark rounded-xl p-6 border border-discord-border space-y-6">
         <div>
-          <h2 class="text-base font-bold text-white">AttendanceBot Ecosystem & Background Daemon</h2>
+          <h2 class="text-base font-bold text-white">Croncord Ecosystem & Background Daemon</h2>
           <p class="text-xs text-discord-muted mt-1">Overview of architecture, anti-detection mechanisms, and terminal deployment options.</p>
         </div>
 
@@ -1745,7 +1899,7 @@
               <span>Anti-Detection Jitter</span>
             </h3>
             <p class="text-xs text-discord-muted">
-              AttendanceBot uses randomized delay jitter (default 1-10 minutes) before firing. Discord's automated pattern algorithms detect check-ins that trigger at the exact zero second mark every day. Jitter breaks the temporal signature and preserves account longevity.
+              Croncord uses randomized delay jitter (default 1-10 minutes) before firing. Discord's automated pattern algorithms detect check-ins that trigger at the exact zero second mark every day. Jitter breaks the temporal signature and preserves account longevity.
             </p>
           </div>
 
@@ -1755,7 +1909,7 @@
               <span>Human Typing Simulation</span>
             </h3>
             <p class="text-xs text-discord-muted">
-              Before message submission, AttendanceBot broadcasts typing indicators (`sendTyping()`) with human-calibrated duration (1.5s base + 100ms per character) simulating natural keystroke pacing.
+              Before message submission, Croncord broadcasts typing indicators (`sendTyping()`) with human-calibrated duration (1.5s base + 100ms per character) simulating natural keystroke pacing.
             </p>
           </div>
 
@@ -1765,7 +1919,7 @@
               <span>Android (Termux No-Root)</span>
             </h3>
             <p class="text-xs text-discord-muted">
-              AttendanceBot includes full support for unrooted Android devices running Termux. The daemon acquires a wake lock through <code class="text-gray-200">termux-wake-lock</code> to avoid sleep-state suspension and hooks into <code class="text-gray-200">~/.termux/boot/</code> for auto-resurrection on reboot.
+              Croncord includes full support for unrooted Android devices running Termux. The daemon acquires a wake lock through <code class="text-gray-200">termux-wake-lock</code> to avoid sleep-state suspension and hooks into <code class="text-gray-200">~/.termux/boot/</code> for auto-resurrection on reboot.
             </p>
           </div>
 
@@ -1818,9 +1972,52 @@
           <label for="modalServerActive" class="text-xs font-medium text-white cursor-pointer">Server profile active and monitoring</label>
         </div>
 
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-semibold text-discord-muted uppercase mb-1">Quiet From (HH:MM, optional)</label>
+            <input type="time" id="modalServerQuietStart" class="w-full bg-discord-darker border border-discord-border rounded-lg px-3.5 py-2 text-sm text-white focus:outline-none focus:border-discord-blurple cursor-pointer" />
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-discord-muted uppercase mb-1">Quiet Until (HH:MM)</label>
+            <input type="time" id="modalServerQuietEnd" class="w-full bg-discord-darker border border-discord-border rounded-lg px-3.5 py-2 text-sm text-white focus:outline-none focus:border-discord-blurple cursor-pointer" />
+          </div>
+        </div>
+        <p class="text-xs text-discord-muted -mt-2">Server override of the global quiet window. Leave both empty to follow global.</p>
+
+        <div class="flex items-center space-x-2 pt-1">
+          <input type="checkbox" id="modalServerIgnoreHolidays" class="rounded bg-discord-card border-discord-border text-discord-blurple focus:ring-0 cursor-pointer" />
+          <label for="modalServerIgnoreHolidays" class="text-xs font-medium text-white cursor-pointer">Run even on holidays (ignore global holiday skips)</label>
+        </div>
+
         <div class="flex items-center justify-end space-x-2 pt-3 border-t border-discord-border">
           <button type="button" onclick="closeServerModal()" class="px-4 py-2 text-xs font-semibold rounded-lg bg-discord-card hover:bg-discord-border text-discord-muted hover:text-white transition cursor-pointer">Cancel</button>
           <button type="submit" class="px-4 py-2 text-xs font-bold rounded-lg bg-discord-blurple hover:bg-indigo-600 text-white shadow transition cursor-pointer">Save Server</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- MODAL: CLONE SERVER PROFILE -->
+  <div id="cloneModal" class="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs hidden items-center justify-center p-4">
+    <div class="bg-discord-dark border border-discord-border rounded-xl max-w-md w-full p-6 shadow-2xl space-y-4">
+      <div class="flex items-center justify-between">
+        <h3 class="text-base font-bold text-white"><i class="fa-solid fa-copy text-indigo-400 mr-2"></i><span id="cloneModalTitle">Clone Server Profile</span></h3>
+        <button onclick="closeCloneServerModal()" class="text-discord-muted hover:text-white text-lg cursor-pointer">&times;</button>
+      </div>
+      <p class="text-xs text-discord-muted">Duplicates every schedule with fresh IDs. Nothing is sent during cloning.</p>
+      <form id="cloneForm" onsubmit="confirmCloneServer(event)" class="space-y-4">
+        <input type="hidden" id="modalCloneServerId" />
+        <div>
+          <label class="block text-xs font-semibold text-discord-muted uppercase mb-1">New Profile Name <span class="text-rose-400">*</span></label>
+          <input type="text" id="modalCloneName" placeholder="e.g. Work-DAO (copy)" required class="w-full bg-discord-darker border border-discord-border rounded-lg px-3.5 py-2 text-sm text-white focus:outline-none focus:border-discord-blurple" />
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-discord-muted uppercase mb-1">New Target Channel ID <span class="text-rose-400">*</span></label>
+          <input type="text" id="modalCloneChannelId" placeholder="e.g. 1234567890123456789" required class="w-full bg-discord-darker border border-discord-border rounded-lg px-3.5 py-2 text-sm text-white focus:outline-none focus:border-discord-blurple mono" />
+        </div>
+        <div class="flex items-center justify-end space-x-2 pt-3 border-t border-discord-border">
+          <button type="button" onclick="closeCloneServerModal()" class="px-4 py-2 text-xs font-semibold rounded-lg bg-discord-card hover:bg-discord-border text-discord-muted hover:text-white transition cursor-pointer">Cancel</button>
+          <button type="submit" class="px-4 py-2 text-xs font-bold rounded-lg bg-discord-blurple hover:bg-indigo-600 text-white shadow transition cursor-pointer">Clone Server</button>
         </div>
       </form>
     </div>
@@ -1919,6 +2116,9 @@
           <label class="block text-xs font-semibold text-discord-muted uppercase mb-1">Message Content (Multi-line supported)</label>
           <textarea id="modalScheduleMessage" rows="3" placeholder="Present" class="w-full bg-discord-darker border border-discord-border rounded-lg p-3 text-sm text-white focus:outline-none focus:border-discord-blurple resize-none">Present</textarea>
           <p class="text-xs text-discord-muted mt-0.5">Typing simulation will adjust naturally to character count before sending.</p>
+          <label class="block text-xs font-semibold text-discord-muted uppercase mt-3 mb-1">Message Variants — one per line (optional pool)</label>
+          <textarea id="modalSchedulePool" rows="3" placeholder="Present — {day}!&#10;Here 🙋 ({date})&#10;Checking in ✅" class="w-full bg-discord-darker border border-discord-border rounded-lg p-3 text-sm text-white focus:outline-none focus:border-discord-blurple resize-none mono"></textarea>
+          <p class="text-xs text-discord-muted mt-0.5">One variant is picked at random per run (anti-detection). <span class="text-indigo-300">{day} {date} {time} {server} {channel}</span> resolve automatically.</p>
         </div>
 
         <!-- Reaction Mode Inputs -->
@@ -1956,6 +2156,23 @@
     </div>
   </div>
 
+  <!-- MODAL: DRY-RUN PREVIEW (read-only render, sends nothing) -->
+  <div id="previewModal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+    <div class="bg-discord-dark border border-discord-border rounded-xl max-w-lg w-full p-6 shadow-2xl space-y-4 max-h-[85vh] overflow-y-auto">
+      <div class="flex items-center justify-between border-b border-discord-border pb-3">
+        <h3 class="text-base font-bold text-white"><i class="fa-solid fa-eye text-indigo-400 mr-2"></i>Dry-Run Preview</h3>
+        <button onclick="closePreviewModal()" class="text-discord-muted hover:text-white text-lg cursor-pointer">&times;</button>
+      </div>
+      <p class="text-xs text-discord-muted">Exact resolved post text. Nothing is sent, logged, or recorded.</p>
+      <div id="previewModalBody" class="space-y-2 text-xs">
+        <p class="text-discord-muted">Loading preview...</p>
+      </div>
+      <div class="flex items-center justify-end pt-3 border-t border-discord-border">
+        <button onclick="closePreviewModal()" class="px-4 py-2 text-xs font-bold rounded-lg bg-discord-blurple hover:bg-indigo-600 text-white shadow transition cursor-pointer">Close</button>
+      </div>
+    </div>
+  </div>
+
   <!-- MODAL: IMPORT CONFIGURATION PREVIEW -->
   <div id="importModal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
     <div class="bg-discord-dark border border-discord-border rounded-xl max-w-lg w-full p-6 shadow-2xl space-y-4">
@@ -1977,7 +2194,7 @@
           <i id="importValidationIcon" class="fa-solid fa-circle-check text-emerald-400 text-sm mt-0.5"></i>
           <div class="space-y-0.5">
             <span id="importValidationTitle" class="font-bold block text-xs">Schema Verification Passed</span>
-            <p id="importValidationDesc" class="text-[11px] text-discord-muted">Uploaded structure matches expected AttendanceBot JSON specification.</p>
+            <p id="importValidationDesc" class="text-[11px] text-discord-muted">Uploaded structure matches expected Croncord JSON specification.</p>
           </div>
         </div>
 
@@ -2302,7 +2519,7 @@
 
   <footer class="mt-auto border-t border-discord-border/60 bg-discord-dark py-3 px-4 sm:px-6">
     <div class="max-w-7xl mx-auto flex flex-wrap items-center justify-between text-xs text-discord-muted gap-2">
-      <p>⚡ AttendanceBot <span id="appFooterVersionBadge" class="global-app-version font-medium">{{APP_VERSION}}</span> • Designed for reliable daily Discord attendance.</p>
+      <p>⚡ Croncord <span id="appFooterVersionBadge" class="global-app-version font-medium">{{APP_VERSION}}</span> • Designed for reliable daily Discord attendance.</p>
       <div class="flex items-center space-x-4">
         <span>Port 3271 Active</span>
         <span class="inline-block w-1.5 h-1.5 rounded-full bg-emerald-400"></span>

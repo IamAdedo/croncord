@@ -11,7 +11,7 @@ A self-hosted Discord message scheduling daemon.
   \\ ██ ██ //  	  ╚══════╝╚══════╝╚══════╝
 ```
 
-> **Croncord v4.0.0 by IamAdedo, dlazyHNTR** \
+> **Croncord v4.1.0 by IamAdedo, dlazyHNTR** \
 > *Automatically send attendance messages to Discord servers on schedule. Set it once, let it run in the background forever — now with a Web Management Dashboard, upcoming-runs preview, holidays & quiet hours, message pools, auto-restore points, and a self-healing daemon.*
 
 ---
@@ -78,6 +78,15 @@ You can manage the bot three ways:
 - 🆕 **Message Templates & Pools** — `{date}`, `{time}`, `{day}`, `{server}`, `{channel}` variables resolved at send time, plus per-schedule variant pools with random pick per run (history records exactly what was sent)
 - 🆕 **Holidays & Quiet Hours** — Global named holidays (`holiday add 2026-12-25 "Christmas Day"`) with per-server opt-out, plus daily quiet windows; firings on these are recorded as neutral `SKIPPED` — never failures, never streak-breakers
 - 🆕 **Self-Healing Daemon** — Automatic reconnect with exponential backoff on Discord drops (5 attempts, fully logged); manual `stop` always wins; reconnect state visible in `status` and the dashboard badge
+
+### New in v4.1.0
+- 🆕 **CRONCORD Banner** — The CLI heading art now spells CRONCORD in matching block letters with a 📆 masthead
+- 🆕 **Dry-Run Preview** — `preview <server> [schedule]`, `/api/servers/:id/schedules/:scid/preview`, and a dashboard Preview button per schedule row: exact resolved post text with zero sends, logs, or history writes
+- 🆕 **Server Clone + Bulk Ops** — `server clone <id> <name> <chanId>` duplicates a profile with fresh IDs; `schedule enable-all/disable-all <srv>` flips every routine; dashboard Clone button, Clone modal, and Enable-all/Pause-all schedule buttons
+- 🆕 **Vacation Mode** — `vacation <until> [note]` pauses everything until a date and auto-resumes after (expired vacations self-clear on save/boot); `/api/vacation` endpoints + dashboard vacation card; upcoming preview hides covered dates
+- 🆕 **Schedule Calendar** — `calendar [YYYY-MM]` ASCII month view + `/api/schedules/calendar` + dashboard month widget with navigation and click-a-day run lists
+- 🆕 **Health Check + Heartbeat** — Cheap `/api/health` probe plus optional heartbeat pings (`heartbeat <url> [mins]`, auto-armed from config on server boot, CLI-set values picked up live via config watch); dashboard Heartbeat card
+- 🆕 **Weekly Digest** — Daemon-scheduled Monday post (`digest on [day] [HH:MM]`, `digest test`, `digest off`) with 7-day totals + per-server breakdown to the global webhook; dashboard digest card with live summary
 
 ---
 
@@ -312,6 +321,8 @@ Removes **both** PM2 services (daemon + web dashboard).
 | `server delete <id\|name>` | Remove a server profile |
 | `server enable-all` / `disable-all` | Bulk toggle all servers |
 | `server ignore-holidays <id> on\|off` | *(New in v3.9)* Opt a server out of holiday skips |
+| `server clone <id> <name> <chanId>` | *(New in v4.1)* Duplicate a profile with fresh IDs |
+| `preview <serverId> [scheduleId]` | *(New in v4.1)* Dry-run: resolved post text, sends nothing |
 | `schedule list <srvId>` | List schedules (with conflict warnings) |
 | `schedule add <srvId> <cron> [msg] [label]` | Add a schedule (warns on conflicts) |
 | `schedule toggle` / `pause` / `resume` | Pause / resume a schedule |
@@ -320,10 +331,15 @@ Removes **both** PM2 services (daemon + web dashboard).
 | `schedule move <srvId> <from> <to>` | Move a schedule between positions |
 | `schedule conflicts <srvId>` | *(New in v3.9)* Show ≤5-minute clash warnings |
 | `schedule pool <srvId> <schedId> [...]` | *(New in v3.9)* View/set message variants |
+| `schedule enable-all \| disable-all <srvId>` | *(New in v4.1)* Bulk enable/pause every routine on a server |
 | `trigger <serverId> [scheduleId]` | Immediate test run |
 | `quiet [start end \| clear]` | *(New in v3.9)* View/set/clear quiet hours |
 | `holiday list \| add <date> [name] \| remove <date>` | *(New in v3.9)* Manage named holidays |
 | `backups` / `restore <file>` | *(New in v3.9)* List / restore config snapshots |
+| `vacation [until] [note] \| off` | *(New in v4.1)* Pause all until a date (auto-resumes) |
+| `calendar [YYYY-MM]` | *(New in v4.1)* Monthly firing calendar |
+| `heartbeat [url] [mins] \| test \| off` | *(New in v4.1)* External monitor pings |
+| `digest [on \| off \| test]` | *(New in v4.1)* Weekly webhook stats summary |
 | `logs [count]` / `logs clear` | Activity logs |
 | `token [new_token]` | View or update the Discord token |
 | `webhook [url]` / `webhook test [url]` | View, update, or live-test the webhook |
@@ -395,6 +411,80 @@ Make posts feel human and never byte-identical:
 
 ---
 
+## 👁️ Dry-Run Preview (v4.1)
+
+See exactly what a schedule *would* post — resolved templates, pool variants, next fire time — without sending, logging, or recording anything:
+
+```bash
+node bin/cli.js preview srv1          # first schedule, fully resolved
+node bin/cli.js preview srv1 a1       # a specific routine
+```
+
+Dashboard: the 👁️ **Preview** button on every schedule row opens the same render in a modal. API: `GET /api/servers/:id/schedules/:scid/preview`.
+
+---
+
+## 🧬 Server Clone & Bulk Ops (v4.1)
+
+```bash
+node bin/cli.js server clone srv1 "Copy" 999888777666555444
+node bin/cli.js schedule disable-all srv1   # pause every routine
+node bin/cli.js schedule enable-all srv1    # resume every routine
+```
+
+Cloning deep-copies all schedules with fresh IDs (channel duplicates rejected). Dashboard: Clone button on each server card (Clone modal) plus Enable-all / Pause-all buttons above every schedule table. API: `POST /api/servers/:id/clone`, `POST /api/servers/:id/schedules/bulk-action`.
+
+---
+
+## 🏖️ Vacation Mode (v4.1)
+
+```bash
+node bin/cli.js vacation 2026-12-20 "Christmas trip"
+node bin/cli.js vacation              # view state
+node bin/cli.js vacation off          # cancel early
+```
+
+Every firing until the end date is skipped neutrally (`SKIPPED`); expired vacations clear themselves on the next save or daemon boot, so schedules always resume. Manual test runs bypass it on purpose. Dashboard vacation card (arm/cancel + status); API: `GET/POST/DELETE /api/vacation`. Imports/exports carry it.
+
+---
+
+## 📆 Schedule Calendar (v4.1)
+
+```bash
+node bin/cli.js calendar              # this month, ASCII grid + day list
+node bin/cli.js calendar 2026-10      # any month
+```
+
+Dashboard: month widget with prev/next navigation and click-a-day run lists (quiet-hour days flagged, holidays excluded). API: `GET /api/schedules/calendar?month=YYYY-MM`.
+
+---
+
+## 💓 Health Check & Heartbeat (v4.1)
+
+```bash
+curl http://localhost:3271/api/health
+node bin/cli.js heartbeat https://hc-ping.com/abc 15
+node bin/cli.js heartbeat test
+node bin/cli.js heartbeat off
+```
+
+`/api/health` is a cheap probe (no history recompute) for uptime monitors. Heartbeat pings the configured URL on an interval from the server process (auto-armed from config at boot; CLI changes picked up live via the config watcher). Dashboard Heartbeat card with arm/test/off.
+
+---
+
+## 📰 Weekly Digest (v4.1)
+
+```bash
+node bin/cli.js digest                # view config
+node bin/cli.js digest on monday 09:00
+node bin/cli.js digest test           # post one immediately
+node bin/cli.js digest off
+```
+
+Every week the daemon posts totals, success rate, and a per-server ✅/❌/⏸️ breakdown to the global webhook (needs a webhook + running daemon). Dashboard digest card shows the live 7-day summary with the same controls. API: `GET/POST/DELETE /api/digest`, `POST /api/digest/test`.
+
+---
+
 ## 🌐 Web Dashboard Tour
 
 Open 👉 **`http://localhost:3271`** (`npm start`):
@@ -408,7 +498,7 @@ Open 👉 **`http://localhost:3271`** (`npm start`):
 - **Holidays & Quiet Hours** — named-holiday manager and quiet-window controls.
 - **Web CLI Terminal** — full command console with history drop-up, help popover, and one-click run/insert.
 
-Key API endpoints: `/api/status`, `/api/version`, `/api/config`, `/api/servers/*`, `/api/servers/:id/schedules/*`, `/api/servers/:id/conflicts`, `/api/schedules/upcoming`, `/api/config/backups`, `/api/config/restore`, `/api/daemon/start|stop`, `/api/test-webhook`, `/api/stats/daily-checkins`, `/api/servers/health`, `/api/logs*`.
+Key API endpoints: `/api/status`, `/api/version`, `/api/health`, `/api/config`, `/api/servers/*`, `/api/servers/:id/schedules/*`, `/api/servers/:id/clone`, `/api/servers/:id/conflicts`, `/api/schedules/upcoming`, `/api/schedules/calendar`, `/api/config/backups`, `/api/config/restore`, `/api/quiet`, `/api/holidays`, `/api/vacation`, `/api/heartbeat`, `/api/digest`, `/api/daemon/start|stop`, `/api/test-webhook`, `/api/stats/daily-checkins`, `/api/servers/health`, `/api/logs*`.
 
 ---
 

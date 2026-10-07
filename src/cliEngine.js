@@ -1,7 +1,7 @@
 /**
  * src/cliEngine.js
  *
- * Unified CLI command parser and executor for AttendanceBot.
+ * Unified CLI command parser and executor for Croncord.
  * Used by:
  * - bin/cli.js (terminal CLI / scripts / interactive menu)
  * - server.js (Web dashboard interactive CLI terminal via POST /api/cli/exec)
@@ -18,6 +18,12 @@ const defaultLogger = require('./logger');
 const defaultAttendanceHistory = require('./attendanceHistory');
 const { validateConfigSchema } = require('./schemaValidator');
 const { VERSION, DISPLAY_VERSION } = require('./version');
+const { analyzeServerScheduleConflicts } = require('./scheduleConflicts');
+const { getUpcomingRuns } = require('./upcoming');
+const configBackups = require('./configBackups');
+const { validatePool, pickMessage, resolveTemplate } = require('./messageTemplates');
+const suppression = require('./suppression');
+const { CronExpressionParser } = require('cron-parser');
 
 const CONFIG_PATH = path.join(__dirname, '..', 'config.json');
 
@@ -86,6 +92,29 @@ class CliEngine {
         }
     }
 
+    findServer(servers, target) {
+        if (!target) return null;
+        const key = String(target).trim();
+        return (servers || []).find(
+            (s) => String(s.id) === key || (s.name || '').toLowerCase() === key.toLowerCase()
+        ) || null;
+    }
+
+    conflictWarningBlock(server) {
+        try {
+            const analysis = analyzeServerScheduleConflicts(server);
+            if (!analysis.hasConflict) return '';
+            const lines = ['', '⚠️ Schedule conflict warning (fires ≤5m apart on overlapping days):'];
+            analysis.conflicts.forEach((c) => {
+                lines.push(`   • ${c.message}`);
+            });
+            lines.push('   💡 Tip: re-schedule at least 10–15 minutes apart or stagger jitter.');
+            return lines.join('\n');
+        } catch (e) {
+            return '';
+        }
+    }
+
     async execute(commandLineOrArgs) {
         let args = [];
         let commandLine = '';
@@ -144,6 +173,11 @@ class CliEngine {
                 case 'run':
                     return await this.cmdTrigger(args.slice(1));
 
+                case 'preview':
+                case 'dry-run':
+                case 'dryrun':
+                    return this.cmdPreview(args.slice(1));
+
                 case 'logs':
                 case 'log':
                     return this.cmdLogs(args.slice(1));
@@ -167,6 +201,39 @@ class CliEngine {
                 case 'service':
                 case 'pm2':
                     return await this.cmdService(args.slice(1));
+
+                case 'upcoming':
+                case 'next':
+                    return this.cmdUpcoming(args.slice(1));
+
+                case 'calendar':
+                case 'cal':
+                    return this.cmdCalendar(args.slice(1));
+
+                case 'backups':
+                case 'snapshots':
+                    return this.cmdBackups();
+
+                case 'restore':
+                    return await this.cmdRestore(args.slice(1));
+
+                case 'quiet':
+                    return this.cmdQuiet(args.slice(1));
+
+                case 'holiday':
+                case 'holidays':
+                    return this.cmdHoliday(args.slice(1));
+
+                case 'vacation':
+                case 'vacations':
+                    return this.cmdVacation(args.slice(1));
+
+                case 'heartbeat':
+                case 'healthcheck':
+                    return await this.cmdHeartbeat(args.slice(1));
+
+                case 'digest':
+                    return await this.cmdDigest(args.slice(1));
 
                 case 'uptime':
                     return this.cmdUptime();
@@ -201,6 +268,7 @@ class CliEngine {
                     '  server toggle <id|name>                Toggle pause / resume for server',
                     '  server pause <id|name>                 Pause automated monitoring for server',
                     '  server resume <id|name>                Resume automated monitoring for server',
+                    '  server ignore-holidays <id> on|off    Opt server out of holiday skips',
                     '  server delete <id|name>                Delete a server profile',
                     '  server enable-all                      Enable monitoring on all servers',
                     '  server disable-all                     Disable monitoring on all servers',
@@ -221,13 +289,17 @@ class CliEngine {
                     '  schedule delete <serverId> <schedId>   Delete a schedule from a server',
                     '  schedule reorder <serverId> <id1,id2>  Reorder schedules by priority',
                     '  schedule move <serverId> <from> <to>   Move schedule between positions',
+                    '  schedule enable-all <serverId>        Enable every routine on a server',
+                    '  schedule disable-all <serverId>       Pause every routine on a server',
+                    '  schedule conflicts <serverId|name>     Show ≤5m clash warnings',
+                    '  schedule pool <srvId> <schedId> [set|clear]  View/set message variants',
                 ].join('\n')
             };
         }
 
         const lines = [
             '═══════════════════════════════════════════════════════════════',
-            `⚡ AttendanceBot CLI Commands & Operations (${DISPLAY_VERSION})`,
+            `⚡ Croncord CLI Commands & Operations (${DISPLAY_VERSION})`,
             '═══════════════════════════════════════════════════════════════',
             '  status                                 Show daemon status & health overview',
             '  start                                  Start background Discord attendance daemon',
@@ -238,7 +310,9 @@ class CliEngine {
             '  server add <name> <chanId> [cron] [msg] Create a new server profile',
             '  server edit <id> [name] [chan] [hook]  Edit server name, channel, or webhook',
             '  server toggle <id|name>                Pause / Resume a server profile',
-            '  server delete <id|name>                Remove a server profile',
+                    '  server delete <id|name>                Remove a server profile',
+            '  server clone <id> <name> <chanId>      Duplicate profile with fresh IDs',
+                    '  server clone <id> <name> <chanId>      Duplicate a profile (fresh IDs)',
             '  server enable-all / disable-all        Bulk enable or disable all servers',
             '',
             '  schedule add <srvId> <cron> [message]  Add attendance schedule to server',
@@ -246,8 +320,21 @@ class CliEngine {
             '  schedule toggle <srvId> <schedId>      Pause / Resume a specific schedule',
             '  schedule delete <srvId> <schedId>      Remove schedule from server',
             '  schedule reorder <srvId> <id1,id2>     Reorder schedule priority sequence',
+            '  schedule conflicts <srvId>             Show ≤5m clash warnings',
+            '  schedule pool <srvId> <schedId>        View/set message variants',
+            '',
+            '  upcoming [count]                       Preview next scheduled fire times',
+            '  calendar [YYYY-MM]                      Monthly firing calendar',
+            '  quiet [HH:MM HH:MM|clear]              View/set/clear global quiet hours',
+            '  holiday list|add|remove                Manage named skip-date holidays',
+            '  vacation [until] [note]|off           Pause all until a date (auto-resume)',
+            '  heartbeat [url] [mins]|test|off      External monitor pings',
+            '  digest [on|off|test]                   Weekly webhook stats summary',
+            '  backups (or snapshots)                 List auto config restore points',
+            '  restore <config-*.json>                Roll back to a restore point',
             '',
             '  trigger <serverId> [scheduleId]        Manually trigger attendance run now',
+            '  preview <serverId> [scheduleId]        Dry-run: show resolved post text (sends nothing)',
             '  logs [count]                           Display recent activity logs (default: 15)',
             '  logs clear                             Clear session activity logs',
             '  token [new_token]                      View or update Discord user token',
@@ -284,6 +371,7 @@ class CliEngine {
         let userTag = 'None';
         let uptimeStr = '0s';
         let activeJobsCount = activeSchedules;
+        let reconnectLine = null;
 
         if (this.daemonManager) {
             const st = this.daemonManager.getStatus();
@@ -293,13 +381,19 @@ class CliEngine {
             if (st.startedAt) {
                 uptimeStr = formatDuration(Date.now() - st.startedAt);
             }
+            if (st.reconnect && (st.reconnect.pending || (st.reconnect.attempts || 0) > 0)) {
+                const r = st.reconnect;
+                reconnectLine = r.pending
+                    ? `🔄 Self-heal retry ${r.attempts}/${r.maxAttempts} in ${Math.max(0, Math.ceil((r.nextAt - Date.now()) / 1000))}s`
+                    : `🔄 Self-heal attempted ${r.attempts}/${r.maxAttempts} (last: ${r.lastError || 'n/a'})`;
+            }
         }
 
         const statusEmoji = daemonStatus === 'RUNNING' ? '🟢 RUNNING' : daemonStatus === 'STARTING' ? '🟡 STARTING' : daemonStatus === 'ERROR' ? '🔴 ERROR' : '⚪ STOPPED';
 
         const lines = [
             '─────────────────────────────────────────────────────────────',
-            '📊 AttendanceBot System & Daemon Status',
+            '📊 Croncord System & Daemon Status',
             '─────────────────────────────────────────────────────────────',
             `  Daemon State     : ${statusEmoji}`,
             `  Discord Account  : ${userTag}`,
@@ -310,8 +404,11 @@ class CliEngine {
             `  Server Profiles  : ${servers.length} configured (${activeServers.length} active)`,
             `  Schedules Count  : ${totalSchedules} total (${activeSchedules} active timers)`,
             `  Cron Watchers    : ${activeJobsCount} live cron triggers registered`,
-            '─────────────────────────────────────────────────────────────',
         ];
+        if (reconnectLine) {
+            lines.push(`  Self-Heal        : ${reconnectLine}`);
+        }
+        lines.push('─────────────────────────────────────────────────────────────');
 
         return { success: true, output: lines.join('\n') };
     }
@@ -324,7 +421,7 @@ class CliEngine {
         if (res.success) {
             return {
                 success: true,
-                output: '✅ AttendanceBot daemon started successfully!\nSchedules are now actively monitored.'
+                output: '✅ Croncord daemon started successfully!\nSchedules are now actively monitored.'
             };
         } else {
             return {
@@ -342,7 +439,7 @@ class CliEngine {
         if (res.success) {
             return {
                 success: true,
-                output: '⚪ AttendanceBot daemon stopped. Schedule timers paused.'
+                output: '⚪ Croncord daemon stopped. Schedule timers paused.'
             };
         } else {
             return {
@@ -359,7 +456,7 @@ class CliEngine {
         await this.daemonManager.stop();
         const res = await this.daemonManager.start();
         if (res.success) {
-            return { success: true, output: '🔄 AttendanceBot daemon restarted successfully!' };
+            return { success: true, output: '🔄 Croncord daemon restarted successfully!' };
         } else {
             return { success: false, output: `❌ Failed to restart daemon: ${res.message}` };
         }
@@ -465,6 +562,7 @@ class CliEngine {
                 channelId: channelId.trim(),
                 webhookUrl: '',
                 active: true,
+                ignoreHolidays: false,
                 schedules: [
                     {
                         id: Date.now().toString() + '01',
@@ -472,6 +570,7 @@ class CliEngine {
                         cron: cronExp.trim(),
                         attendanceType: 'MESSAGE',
                         message: message.trim(),
+                        messagePool: [],
                         emoji: '👍',
                         targetMessageId: '',
                         maxJitterMinutes: 10,
@@ -563,6 +662,64 @@ class CliEngine {
             };
         }
 
+        if (sub === 'ignore-holidays' || sub === 'noholiday' || sub === 'no-holiday') {
+            const target = args[1];
+            const mode = (args[2] || '').toLowerCase();
+            if (!target || !['on', 'off'].includes(mode)) {
+                return { success: false, output: '❌ Usage: server ignore-holidays <serverId|serverName> on|off' };
+            }
+            const srv = this.findServer(servers, target);
+            if (!srv) return { success: false, output: `❌ Server "${target}" not found.` };
+            srv.ignoreHolidays = (mode === 'on');
+            config.servers = servers;
+            this.saveConfig(config);
+            return {
+                success: true,
+                output: srv.ignoreHolidays
+                    ? `✅ Server "${srv.name}" will now RUN on holidays (global holiday skips ignored).`
+                    : `✅ Server "${srv.name}" will now SKIP on holidays (observes the global holiday list).`
+            };
+        }
+
+        if (sub === 'clone') {
+            const target = args[1];
+            const newName = args[2];
+            const newChannelId = args[3];
+            if (!target || !newName || !newChannelId) {
+                return { success: false, output: '❌ Usage: server clone <serverId|serverName> "<new_name>" <new_channel_id>' };
+            }
+            const src = this.findServer(servers, target);
+            if (!src) return { success: false, output: `❌ Server "${target}" not found.` };
+
+            const cleanChan = String(newChannelId).trim();
+            const dupe = servers.find((s) => (s.channelId && s.channelId.trim() === cleanChan));
+            if (dupe) {
+                return { success: false, output: `❌ Channel ${cleanChan} is already used by "${dupe.name}". Pick another channel.` };
+            }
+
+            const stamp = Date.now().toString();
+            const cloned = {
+                id: stamp,
+                name: String(newName).trim(),
+                channelId: cleanChan,
+                webhookUrl: src.webhookUrl || '',
+                active: Boolean(src.active),
+                ignoreHolidays: Boolean(src.ignoreHolidays),
+                ...(src.quietHours ? { quietHours: { ...src.quietHours } } : {}),
+                schedules: (src.schedules || []).map((sc, i) => ({
+                    ...JSON.parse(JSON.stringify(sc)),
+                    id: `${stamp}_${i}`,
+                })),
+            };
+            servers.push(cloned);
+            config.servers = servers;
+            this.saveConfig(config);
+            return {
+                success: true,
+                output: `✅ Cloned "${src.name}" → "${cloned.name}" with ${(cloned.schedules || []).length} schedule(s) (fresh IDs).\nServer ID: ${cloned.id} | Channel ID: ${cloned.channelId}${this.conflictWarningBlock(cloned)}`
+            };
+        }
+
         if (sub === 'enable-all' || sub === 'disable-all') {
             const enable = (sub === 'enable-all');
             servers.forEach(s => { s.active = enable; });
@@ -594,11 +751,83 @@ class CliEngine {
             const scheds = srv.schedules || [];
             if (scheds.length === 0) return { success: true, output: `Server "${srv.name}" has no schedules.` };
 
-            const lines = [`📅 Schedules for "${srv.name}" (ID: ${srv.id}):`];
+            const lines = [`📅 Schedules for "${srv.name}" (ID: ${srv.id}) — priority order:`];
             scheds.forEach((sc, i) => {
                 lines.push(`  [#${i + 1}] ID: ${sc.id} | "${sc.label}" | Cron: "${sc.cron}" | Active: ${sc.active ? 'YES' : 'NO'}`);
             });
+            lines.push(this.conflictWarningBlock(srv));
+            return { success: true, output: lines.join('\n').trimEnd() };
+        }
+
+        if (sub === 'conflicts' || sub === 'check' || sub === 'check-conflicts') {
+            const target = args[1];
+            if (!target) return { success: false, output: '❌ Usage: schedule conflicts <serverId|serverName>' };
+            const srv = this.findServer(servers, target);
+            if (!srv) return { success: false, output: `❌ Server "${target}" not found.` };
+            const analysis = analyzeServerScheduleConflicts(srv);
+            if (!analysis.hasConflict) {
+                return { success: true, output: `✅ No schedule conflicts detected on "${srv.name}" (${(srv.schedules || []).length} schedule(s) checked).` };
+            }
+            const lines = [
+                `⚠️ ${analysis.conflicts.length} schedule conflict(s) on "${srv.name}":`,
+                ...analysis.conflicts.map((c) => `  • ${c.message}`),
+                '💡 Tip: re-schedule at least 10–15 minutes apart or stagger jitter.',
+            ];
             return { success: true, output: lines.join('\n') };
+        }
+
+        if (sub === 'pool' || sub === 'messages' || sub === 'variants') {
+            const target = args[1];
+            const schedId = args[2];
+            const action = (args[3] || 'view').toLowerCase();
+            if (!target || !schedId) {
+                return { success: false, output: '❌ Usage: schedule pool <serverId|serverName> <scheduleId> [view|set <msg...> |clear]\nExample: schedule pool srv1 a1 set "Present ✅" "Here 🙋"' };
+            }
+            const srv = this.findServer(servers, target);
+            if (!srv) return { success: false, output: `❌ Server "${target}" not found.` };
+            const sc = (srv.schedules || []).find((x) => String(x.id) === String(schedId));
+            if (!sc) return { success: false, output: `❌ Schedule "${schedId}" not found on server "${srv.name}".` };
+            if (sc.attendanceType === 'REACTION') {
+                return { success: false, output: '❌ Message pools apply to MESSAGE schedules only (reaction mode uses emoji).' };
+            }
+
+            if (action === 'view' || action === 'show' || action === 'list') {
+                const pool = Array.isArray(sc.messagePool) ? sc.messagePool : [];
+                const lines = [`💬 Message variants for "${sc.label}" on "${srv.name}":`, `   Base: "${sc.message || 'Present'}"`];
+                if (pool.length === 0) {
+                    lines.push('   Pool: (empty — base message always sent; variables like {day} still resolve)');
+                } else {
+                    pool.forEach((m, i) => lines.push(`   [${i + 1}] "${m}"`));
+                    lines.push('   One variant is picked at random per run, then {variables} resolve.');
+                }
+                return { success: true, output: lines.join('\n') };
+            }
+
+            if (action === 'clear') {
+                sc.messagePool = [];
+                config.servers = servers;
+                this.saveConfig(config);
+                return { success: true, output: `🧹 Cleared message variants on "${sc.label}" (base message kept).` };
+            }
+
+            if (action === 'set' || action === 'add') {
+                const variants = args.slice(4).map((m) => String(m)).filter((m) => m.trim());
+                if (variants.length === 0) {
+                    return { success: false, output: '❌ Usage: schedule pool <serverId> <scheduleId> set "variant 1" ["variant 2" ...]' };
+                }
+                const check = validatePool(action === 'add' ? [...(sc.messagePool || []), ...variants] : variants);
+                if (!check.valid) return { success: false, output: `❌ ${check.error}` };
+                sc.messagePool = check.sanitized;
+                config.servers = servers;
+                this.saveConfig(config);
+                return {
+                    success: true,
+                    output: `✅ Set ${sc.messagePool.length} message variant(s) on "${sc.label}".\n` +
+                        sc.messagePool.map((m, i) => `   [${i + 1}] "${m}"`).join('\n')
+                };
+            }
+
+            return { success: false, output: '❌ Usage: schedule pool <serverId> <scheduleId> [view|set <msg...>|clear]' };
         }
 
         if (sub === 'add') {
@@ -625,6 +854,7 @@ class CliEngine {
                 cron: cronExp.trim(),
                 attendanceType: 'MESSAGE',
                 message,
+                messagePool: [],
                 emoji: '👍',
                 targetMessageId: '',
                 maxJitterMinutes: 10,
@@ -636,7 +866,7 @@ class CliEngine {
             this.saveConfig(config);
             return {
                 success: true,
-                output: `✅ Added schedule "${newSched.label}" to server "${srv.name}".\nSchedule ID: ${newSched.id} | Cron: ${newSched.cron}`
+                output: `✅ Added schedule "${newSched.label}" to server "${srv.name}".\nSchedule ID: ${newSched.id} | Cron: ${newSched.cron}${this.conflictWarningBlock(srv)}`
             };
         }
 
@@ -743,6 +973,21 @@ class CliEngine {
             };
         }
 
+        if (sub === 'enable-all' || sub === 'disable-all') {
+            const target = args[1];
+            if (!target) return { success: false, output: `❌ Usage: schedule ${sub} <serverId|serverName>` };
+            const srv = this.findServer(servers, target);
+            if (!srv) return { success: false, output: `❌ Server "${target}" not found.` };
+            const enable = (sub === 'enable-all');
+            (srv.schedules || []).forEach((sc) => { sc.active = enable; });
+            config.servers = servers;
+            this.saveConfig(config);
+            return {
+                success: true,
+                output: `✅ ${enable ? 'Enabled' : 'Paused'} all ${(srv.schedules || []).length} schedule(s) on "${srv.name}".`
+            };
+        }
+
         return { success: false, output: '❌ Unknown schedule subcommand. Try "help schedule".' };
     }
 
@@ -789,6 +1034,101 @@ class CliEngine {
         } catch (err) {
             return { success: false, output: `❌ Trigger error: ${err.message}` };
         }
+    }
+
+    /**
+     * Builds a dry-run preview payload for one schedule (shared by the
+     * `preview` command and the dashboard preview endpoint).
+     * Pure read-only: resolves templates + pool variants, never sends.
+     */
+    buildPreview(server, schedule, at = new Date()) {
+        const isReaction = (schedule.attendanceType || 'MESSAGE').toUpperCase() === 'REACTION';
+        let nextFire = null;
+        try {
+            const it = CronExpressionParser.parse(schedule.cron, { currentDate: at });
+            nextFire = it.next().toDate().toISOString();
+        } catch (e) {
+            nextFire = null;
+        }
+
+        const base = {
+            serverId: String(server.id),
+            serverName: server.name,
+            channelId: server.channelId,
+            scheduleId: String(schedule.id),
+            scheduleLabel: schedule.label,
+            cron: schedule.cron,
+            attendanceType: isReaction ? 'REACTION' : 'MESSAGE',
+            active: Boolean(schedule.active),
+            nextFire,
+            previewedAt: at.toISOString(),
+        };
+
+        if (isReaction) {
+            return {
+                ...base,
+                emoji: schedule.emoji || '👍',
+                targetMessageId: schedule.targetMessageId || '(newest message in channel)',
+            };
+        }
+
+        const pool = Array.isArray(schedule.messagePool)
+            ? schedule.messagePool.map((m) => String(m)).filter((m) => m.trim())
+            : [];
+        return {
+            ...base,
+            baseMessage: schedule.message || 'Present',
+            resolvedBase: resolveTemplate(schedule.message || 'Present', server, at),
+            pool,
+            resolvedPool: pool.map((m) => resolveTemplate(m, server, at)),
+            randomPickNote: pool.length > 0
+                ? 'One variant is picked at random per run (preview shows all).'
+                : 'No variants — base message always sent.',
+        };
+    }
+
+    cmdPreview(args) {
+        const srvId = args[0];
+        const schedId = args[1];
+        if (!srvId) {
+            return { success: false, output: '❌ Usage: preview <serverId|serverName> [scheduleId]' };
+        }
+        const config = this.getConfig();
+        const srv = this.findServer((config.servers || []), srvId);
+        if (!srv) {
+            return { success: false, output: `❌ Server profile "${srvId}" not found.` };
+        }
+        let target = null;
+        if (schedId) {
+            target = (srv.schedules || []).find((s) => String(s.id) === String(schedId));
+            if (!target) return { success: false, output: `❌ Schedule "${schedId}" not found on server "${srv.name}".` };
+        } else {
+            target = (srv.schedules || [])[0];
+            if (!target) return { success: false, output: `❌ No schedules found for server "${srv.name}".` };
+        }
+
+        const p = this.buildPreview(srv, target, new Date());
+        const lines = [
+            `👁️ Dry-run preview — "${p.scheduleLabel}" on "${p.serverName}" (nothing sent):`,
+            '─────────────────────────────────────────────────────────────',
+            `   Channel   : ${p.channelId}`,
+            `   Cron      : ${p.cron}${p.nextFire ? `  (next: ${new Date(p.nextFire).toLocaleString()})` : '  (unparseable cron)'}`,
+            `   Mode      : ${p.attendanceType}${p.active ? '' : '  [PAUSED]'}`,
+        ];
+        if (p.attendanceType === 'REACTION') {
+            lines.push(`   Emoji     : ${p.emoji}`);
+            lines.push(`   Target    : ${p.targetMessageId}`);
+        } else {
+            lines.push(`   Message   : "${p.resolvedBase}"`);
+            if (p.pool.length > 0) {
+                lines.push(`   Variants (${p.pool.length}, random pick at runtime):`);
+                p.resolvedPool.forEach((m, i) => lines.push(`     [${i + 1}] "${m}"`));
+            } else {
+                lines.push('   Variants  : none (base message always sent)');
+            }
+        }
+        lines.push('─────────────────────────────────────────────────────────────');
+        return { success: true, output: lines.join('\n') };
     }
 
     cmdLogs(args) {
@@ -868,8 +1208,8 @@ class CliEngine {
                     const u = new URL(url);
                     const body = JSON.stringify({
                         embeds: [{
-                            title: '🔔 AttendanceBot Webhook Test (CLI)',
-                            description: 'Test notification from AttendanceBot CLI Engine.',
+                            title: '🔔 Croncord Webhook Test (CLI)',
+                            description: 'Test notification from Croncord CLI Engine.',
                             color: 5814783,
                             timestamp: new Date().toISOString()
                         }]
@@ -1019,6 +1359,24 @@ class CliEngine {
                 config.globalWebhookUrl = res.sanitized.globalWebhookUrl;
             }
 
+            if (res.sanitized.globalQuietHours) {
+                config.globalQuietHours = res.sanitized.globalQuietHours;
+            }
+            if (res.sanitized.globalHolidays && res.sanitized.globalHolidays.length > 0) {
+                const merged = new Map((config.globalHolidays || []).map((h) => [h.date, h]));
+                res.sanitized.globalHolidays.forEach((h) => merged.set(h.date, h));
+                config.globalHolidays = [...merged.values()].sort((a, b) => String(a.date).localeCompare(String(b.date)));
+            }
+            if (res.sanitized.vacation) {
+                config.vacation = res.sanitized.vacation;
+            }
+            if (res.sanitized.heartbeat) {
+                config.heartbeat = res.sanitized.heartbeat;
+            }
+            if (res.sanitized.digest) {
+                config.digest = res.sanitized.digest;
+            }
+
             const saved = this.saveConfig(config);
             if (!saved) {
                 return { success: false, output: '❌ Failed to save configuration to disk.' };
@@ -1039,6 +1397,395 @@ class CliEngine {
         }
     }
 
+    cmdVacation(args) {
+        const config = this.getConfig();
+        const sub = (args[0] || 'status').toLowerCase();
+
+        const describe = () => {
+            const st = suppression.vacationStatus(config.vacation, new Date());
+            if (st.active) {
+                return {
+                    success: true,
+                    output: [
+                        '🏖️ Vacation mode is ARMED — every firing is skipped (neutral) until ' + st.until + '.',
+                        st.note ? `   Note: ${st.note}` : '   (no note)',
+                        '   Disarm early: vacation off',
+                    ].join('\n'),
+                };
+            }
+            return { success: true, output: '🏖️ Vacation mode is OFF — schedules fire normally.\nArm it: vacation <YYYY-MM-DD> [note]' };
+        };
+
+        if (!sub || sub === 'status' || sub === 'show' || sub === 'view') {
+            return describe();
+        }
+
+        if (sub === 'off' || sub === 'clear' || sub === 'cancel' || sub === 'end') {
+            if (!config.vacation) {
+                return { success: true, output: '🏖️ Vacation mode is already off.' };
+            }
+            config.vacation = null;
+            this.saveConfig(config);
+            return { success: true, output: '🏖️ Vacation cancelled — all schedules resumed.' };
+        }
+
+        const until = args[0];
+        const note = args.slice(1).join(' ').trim();
+        const check = suppression.validateVacation({ until, note });
+        if (!check.valid) {
+            return { success: false, output: `❌ ${check.error}\nUsage: vacation <YYYY-MM-DD> [note]  (e.g. vacation 2026-12-20 "Christmas trip")` };
+        }
+        const todayKey = suppression.normalizeDateKey(new Date());
+        if (check.sanitized.until < todayKey) {
+            return { success: false, output: `❌ Vacation end date ${check.sanitized.until} is in the past. Pick today or later.` };
+        }
+        config.vacation = { ...check.sanitized, armedAt: new Date().toISOString() };
+        this.saveConfig(config);
+        return {
+            success: true,
+            output: `🏖️ Vacation mode ARMED until ${check.sanitized.until}${check.sanitized.note ? ` ("${check.sanitized.note}")` : ''}.\nEvery firing until then is skipped (neutral) and resumes automatically after.`
+        };
+    }
+
+        cmdCalendar(args) {
+        const { getCalendarMonth } = require('./upcoming');
+        const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
+            'July', 'August', 'September', 'October', 'November', 'December'];
+        let year, month;
+        const param = String(args[0] || '').trim();
+        if (!param) {
+            const now = new Date();
+            year = now.getFullYear();
+            month = now.getMonth() + 1;
+        } else if (/^\d{4}-\d{2}$/.test(param)) {
+            year = parseInt(param.slice(0, 4), 10);
+            month = parseInt(param.slice(5, 7), 10);
+            if (month < 1 || month > 12) {
+                return { success: false, output: '❌ Usage: calendar [YYYY-MM]  (e.g. calendar 2026-10)' };
+            }
+        } else {
+            return { success: false, output: '❌ Usage: calendar [YYYY-MM]  (e.g. calendar 2026-10)' };
+        }
+
+        const config = this.getConfig();
+        const cal = getCalendarMonth(config, year, month);
+        const lines = [`📆 ${MONTH_NAMES[month - 1]} ${year} — ${cal.activeDays} firing day(s):`, '─────────────────────────────────────────────────────────────'];
+        lines.push('  Su  Mo  Tu  We  Th  Fr  Sa');
+
+        let week = ' ';
+        for (let i = 0; i < cal.firstWeekday; i++) week += '     ';
+        cal.days.forEach((d) => {
+            const dayNum = parseInt(d.date.slice(8, 10), 10);
+            const mark = d.count > 0 ? '●' : ' ';
+            week += ` ${String(dayNum).padStart(2, ' ')}${mark} `;
+            if (d.weekday === 6) {
+                lines.push(' ' + week.trimEnd());
+                week = ' ';
+            }
+        });
+        if (week.trim()) lines.push(' ' + week.trimEnd());
+
+        lines.push('─────────────────────────────────────────────────────────────');
+        const activeDays = cal.days.filter((d) => d.count > 0);
+        if (activeDays.length === 0) {
+            lines.push('No firings scheduled this month.');
+        } else {
+            activeDays.forEach((d) => {
+                const names = [...new Set(d.runs.map((r) => `"${r.scheduleLabel}" (${r.serverName})`))];
+                lines.push(`  ${d.date}: ${d.count} run(s) — ${names.join(', ')}${d.quiet > 0 ? ' [quiet-hours]' : ''}`);
+            });
+        }
+        if (cal.vacationActive) {
+            lines.push(`🏖️ Vacation mode armed — ${cal.vacationSkipped} occurrence(s) hidden this month.`);
+        }
+        lines.push('● = firing day  •  Holidays excluded automatically.');
+        return { success: true, output: lines.join('\n') };
+    }
+
+    async cmdHeartbeat(args) {
+        const https = require('https');
+        const http = require('http');
+        const config = this.getConfig();
+        const sub = (args[0] || 'status').toLowerCase();
+
+        const pingOnce = (targetUrl) => new Promise((resolve) => {
+            let url;
+            try {
+                url = new URL(String(targetUrl).trim());
+            } catch (e) {
+                return resolve({ ok: false, error: 'Invalid URL.' });
+            }
+            if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+                return resolve({ ok: false, error: 'URL must be http(s).' });
+            }
+            const lib = url.protocol === 'https:' ? https : http;
+            const req = lib.get(url, { timeout: 8000 }, (res) => {
+                const ok = res.statusCode >= 200 && res.statusCode < 300;
+                res.resume();
+                resolve({ ok, statusCode: res.statusCode });
+            });
+            req.on('error', (err) => resolve({ ok: false, error: err.message }));
+            req.on('timeout', () => {
+                req.destroy();
+                resolve({ ok: false, error: 'Ping timed out.' });
+            });
+        });
+
+        if (!sub || sub === 'status' || sub === 'show' || sub === 'view') {
+            const hb = config.heartbeat;
+            if (!hb || !hb.url) {
+                return { success: true, output: '💓 Heartbeat is OFF (no URL configured).\nArm it: heartbeat <url> [minutes]  (e.g. heartbeat https://hc-ping.com/abc 15)' };
+            }
+            return {
+                success: true,
+                output: `💓 Heartbeat ARMED: ${hb.url} every ${hb.intervalMinutes || 15}m.\n   Test now: heartbeat test   •   Disarm: heartbeat off`
+            };
+        }
+
+        if (sub === 'off' || sub === 'clear' || sub === 'disable') {
+            config.heartbeat = null;
+            this.saveConfig(config);
+            return { success: true, output: '💓 Heartbeat disarmed.' };
+        }
+
+        if (sub === 'test') {
+            const target = args[1] || (config.heartbeat || {}).url;
+            if (!target) {
+                return { success: false, output: '❌ No heartbeat URL configured. Usage: heartbeat test [url]' };
+            }
+            const r = await pingOnce(target);
+            return r.ok
+                ? { success: true, output: `💓 Heartbeat test ping delivered (HTTP ${r.statusCode}).` }
+                : { success: false, output: `❌ Heartbeat test failed: ${r.error || ('HTTP ' + r.statusCode)}` };
+        }
+
+        const url = args[0];
+        const minutes = Math.min(Math.max(parseInt(args[1], 10) || 15, 1), 1440);
+        try {
+            const parsed = new URL(String(url).trim());
+            if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('bad proto');
+        } catch (e) {
+            return { success: false, output: '❌ Usage: heartbeat <http(s) url> [minutes 1-1440]' };
+        }
+        config.heartbeat = { url: String(url).trim(), intervalMinutes: minutes };
+        this.saveConfig(config);
+        return { success: true, output: `💓 Heartbeat armed: ${url.trim()} every ${minutes}m.\n   Takes effect when the web server (re)starts. Test now: heartbeat test` };
+    }
+
+        async cmdDigest(args) {
+        const DAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+        const config = this.getConfig();
+        const sub = (args[0] || 'status').toLowerCase();
+
+        const describe = () => {
+            const d = config.digest;
+            if (d && d.enabled) {
+                return { success: true, output: `📰 Weekly digest is ON — posts every ${d.day || 'monday'} at ${d.time || '09:00'} to the global webhook.\n   Change: digest on [day] [HH:MM]   •   Send now: digest test   •   Off: digest off` };
+            }
+            return { success: true, output: '📰 Weekly digest is OFF.\nEnable: digest on [day] [HH:MM]  (e.g. digest on monday 09:00)' };
+        };
+
+        if (!sub || sub === 'status' || sub === 'show' || sub === 'view') {
+            return describe();
+        }
+
+        if (sub === 'off' || sub === 'disable' || sub === 'clear') {
+            config.digest = { ...(config.digest || {}), enabled: false };
+            this.saveConfig(config);
+            return { success: true, output: '📰 Weekly digest disabled.' };
+        }
+
+        if (sub === 'test') {
+            if (!this.daemonManager || !this.daemonManager.sendDigest) {
+                return { success: false, output: '❌ Digest sender is not available in this context.' };
+            }
+            const r = await this.daemonManager.sendDigest(true);
+            return r.success
+                ? { success: true, output: `✅ ${r.message}` }
+                : { success: false, output: `❌ ${r.message}` };
+        }
+
+        if (sub === 'on' || sub === 'enable') {
+            const day = (args[1] || (config.digest || {}).day || 'monday').toLowerCase();
+            const time = args[2] || (config.digest || {}).time || '09:00';
+            if (!DAYS.includes(day)) {
+                return { success: false, output: `❌ Unknown day "${args[1]}". Use: ${DAYS.join(', ')}` };
+            }
+            if (suppression.parseHHMM(time) === null) {
+                return { success: false, output: '❌ Time must be HH:MM (24h), e.g. 09:00.' };
+            }
+            config.digest = { enabled: true, day, time };
+            this.saveConfig(config);
+            return { success: true, output: `📰 Weekly digest enabled — every ${day} at ${time} (takes effect on daemon restart/reload).` };
+        }
+
+        return { success: false, output: '❌ Usage: digest [status|on [day] [HH:MM]|off|test]' };
+    }
+
+    cmdUpcoming(args) {        const count = Math.min(Math.max(parseInt(args[0], 10) || 10, 1), 50);
+        const config = this.getConfig();
+        let timeline;
+        try {
+            timeline = getUpcomingRuns(config, { count });
+        } catch (err) {
+            return { success: false, output: `❌ Could not compute upcoming runs: ${err.message}` };
+        }
+        if (timeline.runs.length === 0) {
+            return { success: true, output: '🔮 No upcoming runs — no active schedules with valid crons found.' };
+        }
+        const lines = [`🔮 Upcoming Runs (next ${timeline.runs.length}):`, '─────────────────────────────────────────────────────────────'];
+        timeline.runs.forEach((r, i) => {
+            const at = new Date(r.at);
+            const diffMs = Math.max(0, at.getTime() - Date.now());
+            const when = at.toLocaleString();
+            const inStr = formatDuration(diffMs) === '0s' ? 'now' : `in ${formatDuration(diffMs)}`;
+            const flags = [r.oneTime ? 'ONE-TIME' : null, r.quiet ? 'QUIET-HOURS' : null].filter(Boolean);
+            lines.push(`  #${i + 1} ${when} (${inStr}) — "${r.scheduleLabel}" on "${r.serverName}"${flags.length ? ` [${flags.join(', ')}]` : ''}`);
+        });
+        lines.push('─────────────────────────────────────────────────────────────');
+        if (timeline.quietFlagged > 0) {
+            lines.push(`⚠️ ${timeline.quietFlagged} listed run(s) fall inside quiet hours and will be skipped at fire time.`);
+        }
+        if (timeline.vacationActive) {
+            lines.push(`🏖️ Vacation mode is armed — ${timeline.vacationSkipped} occurrence(s) hidden until it ends.`);
+        }
+        lines.push('💡 Holidays are excluded automatically (intentional skips, never failures).');
+        return { success: true, output: lines.join('\n') };
+    }
+
+    cmdBackups() {
+        const snaps = configBackups.listBackups();
+        if (snaps.length === 0) {
+            return { success: true, output: '📸 No restore points yet. One is saved automatically before every config change.' };
+        }
+        const lines = [`📸 Config Restore Points (${snaps.length}, newest first):`, '─────────────────────────────────────────────────────────────'];
+        snaps.forEach((s, i) => {
+            lines.push(`  #${i + 1} ${s.file}  (${(s.size / 1024).toFixed(1)} KB, ${s.createdAt || 'unknown time'})`);
+        });
+        lines.push('─────────────────────────────────────────────────────────────');
+        lines.push('💡 Roll back with: restore <filename>');
+        return { success: true, output: lines.join('\n') };
+    }
+
+    async cmdRestore(args) {
+        const file = args[0];
+        if (!file) {
+            return { success: false, output: '❌ Usage: restore <config-YYYY-MM-DD-HH-mm-ss.json>\nSee available points with: backups' };
+        }
+        let snapshot;
+        try {
+            snapshot = configBackups.readBackup(file);
+        } catch (err) {
+            return { success: false, output: `❌ ${err.message}` };
+        }
+        if (!snapshot || !Array.isArray(snapshot.servers)) {
+            return { success: false, output: `❌ Restore point "${file}" is not a valid config (missing servers array).` };
+        }
+        const saved = this.saveConfig(snapshot);
+        if (!saved) {
+            return { success: false, output: '❌ Failed to write restored configuration to disk.' };
+        }
+        if (this.daemonManager && this.daemonManager.status === 'RUNNING') {
+            this.daemonManager.initializeSchedules(snapshot);
+        }
+        return {
+            success: true,
+            output: `♻️ Restored configuration from "${file}".\nServers: ${(snapshot.servers || []).length} | (A pre-restore snapshot was saved automatically.)`
+        };
+    }
+
+    cmdQuiet(args) {
+        const config = this.getConfig();
+        const sub = (args[0] || '').toLowerCase();
+
+        if (!sub || sub === 'show' || sub === 'view' || sub === 'status') {
+            const lines = ['🌙 Quiet Hours (daily blackout window):', '─────────────────────────────────────────────────────────────'];
+            if (config.globalQuietHours) {
+                lines.push(`   Global: ${config.globalQuietHours.start}–${config.globalQuietHours.end}`);
+            } else {
+                lines.push('   Global: (not set — runs fire at their scheduled times)');
+            }
+            (config.servers || []).forEach((s) => {
+                if (s.quietHours) lines.push(`   "${s.name}": ${s.quietHours.start}–${s.quietHours.end} (server override)`);
+            });
+            lines.push('─────────────────────────────────────────────────────────────');
+            lines.push('💡 Usage: quiet <HH:MM> <HH:MM>  (e.g. quiet 22:00 07:00) | quiet clear');
+            lines.push('   Windows may cross midnight. Firings inside are SKIPPED, never failed.');
+            return { success: true, output: lines.join('\n') };
+        }
+
+        if (sub === 'clear' || sub === 'off' || sub === 'none') {
+            config.globalQuietHours = null;
+            (config.servers || []).forEach((s) => { delete s.quietHours; });
+            this.saveConfig(config);
+            return { success: true, output: '🌙 Quiet hours cleared everywhere (global + per-server overrides).' };
+        }
+
+        const start = args[0];
+        const end = args[1];
+        const check = suppression.validateQuietHours({ start, end });
+        if (!check.valid) {
+            return { success: false, output: `❌ ${check.error}\nUsage: quiet <HH:MM> <HH:MM>  (e.g. quiet 22:00 07:00)` };
+        }
+        config.globalQuietHours = { start: start.trim(), end: end.trim() };
+        this.saveConfig(config);
+        return { success: true, output: `🌙 Global quiet hours set: ${start.trim()}–${end.trim()}.\nFirings inside this window are skipped (SKIPPED, never failed).` };
+    }
+
+    cmdHoliday(args) {
+        const config = this.getConfig();
+        if (!Array.isArray(config.globalHolidays)) config.globalHolidays = [];
+        const sub = (args[0] || 'list').toLowerCase();
+
+        if (sub === 'list' || sub === 'show') {
+            if (config.globalHolidays.length === 0) {
+                return { success: true, output: '🏖️ No holidays configured. Runs fire every scheduled day.\nAdd one: holiday add 2026-12-25 "Christmas Day"' };
+            }
+            const sorted = [...config.globalHolidays].sort((a, b) => String(a.date).localeCompare(String(b.date)));
+            const lines = [`🏖️ Holidays — intentional skip dates (${sorted.length}):`, '─────────────────────────────────────────────────────────────'];
+            const todayKey = suppression.normalizeDateKey(new Date());
+            sorted.forEach((h) => {
+                const past = String(h.date) < todayKey ? ' (past)' : '';
+                lines.push(`   ${h.date} — ${h.name}${past}`);
+            });
+            lines.push('─────────────────────────────────────────────────────────────');
+            lines.push('💡 Firings on these days are SKIPPED (neutral — streaks untouched).');
+            lines.push('   Per-server opt-out: server ignore-holidays <id> on|off');
+            return { success: true, output: lines.join('\n') };
+        }
+
+        if (sub === 'add') {
+            const date = args[1];
+            const name = args.slice(2).join(' ').trim();
+            const check = suppression.validateHoliday({ date, name });
+            if (!check.valid) {
+                return { success: false, output: `❌ ${check.error}\nUsage: holiday add <YYYY-MM-DD> "<name>"` };
+            }
+            if (config.globalHolidays.some((h) => suppression.normalizeDateKey(h.date) === check.sanitized.date)) {
+                return { success: false, output: `❌ ${check.sanitized.date} is already a holiday. Remove it first to rename.` };
+            }
+            config.globalHolidays.push(check.sanitized);
+            this.saveConfig(config);
+            return { success: true, output: `🏖️ Holiday added: ${check.sanitized.date} — ${check.sanitized.name}.\nScheduled firings on this day will be skipped (neutral).` };
+        }
+
+        if (sub === 'remove' || sub === 'rm' || sub === 'delete') {
+            const date = suppression.normalizeDateKey(args[1]);
+            if (!date) {
+                return { success: false, output: '❌ Usage: holiday remove <YYYY-MM-DD>' };
+            }
+            const before = config.globalHolidays.length;
+            config.globalHolidays = config.globalHolidays.filter((h) => suppression.normalizeDateKey(h.date) !== date);
+            if (config.globalHolidays.length === before) {
+                return { success: false, output: `❌ No holiday found on ${date}.` };
+            }
+            this.saveConfig(config);
+            return { success: true, output: `🧹 Removed holiday on ${date}.` };
+        }
+
+        return { success: false, output: '❌ Usage: holiday <list|add <YYYY-MM-DD> "<name>"|remove <YYYY-MM-DD>>' };
+    }
+
     async cmdService(args) {
         const sub = (args[0] || 'status').toLowerCase();
         const runExec = (cmd) => new Promise((resolve) => {
@@ -1048,7 +1795,7 @@ class CliEngine {
         });
 
         if (sub === 'status') {
-            const out = await runExec('npx pm2 status attendanceBot-daemon');
+            const out = await runExec('npx pm2 status croncord-daemon croncord-web');
             return { success: true, output: out || 'PM2 service check completed.' };
         }
         if (sub === 'install' || sub === 'start') {
@@ -1061,7 +1808,7 @@ class CliEngine {
         }
         if (sub === 'logs') {
             const lines = args[1] || '20';
-            const out = await runExec(`npx pm2 logs attendanceBot-daemon --lines ${lines} --nostream`);
+            const out = await runExec(`npx pm2 logs croncord-daemon --lines ${lines} --nostream`);
             return { success: true, output: out || 'No PM2 logs available.' };
         }
         return {

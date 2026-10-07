@@ -6,6 +6,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [4.1.0] - 2026-10-07
+
+### Added
+- **📆 CRONCORD CLI banner:** the terminal heading art now spells CRONCORD (hand-built block glyphs in the original style, 70 cols) with a 📆 masthead.
+- **👁️ Dry-Run Preview:** shared `buildPreview` (engine) + `GET /api/servers/:id/schedules/:scid/preview`; `preview <server> [schedule]` command, dashboard Preview button + read-only modal per schedule row. Zero sends, logs, or history writes.
+- **🧬 Server Clone + Bulk Ops:** `server clone <id> <name> <chanId>` (deep copy, fresh IDs, channel-dupe guard) + `POST /api/servers/:id/clone`; `schedule enable-all/disable-all` + `POST .../schedules/bulk-action`; dashboard Clone button/modal and Enable-all/Pause-all schedule buttons.
+- **🏖️ Vacation Mode:** `vacation [until] [note]|off`, `GET/POST/DELETE /api/vacation`, dashboard vacation card; suppression reason `vacation` (neutral `SKIPPED`); expired vacations self-clear on save/boot/standalone-boot; upcoming preview hides covered dates with counts; import/export carry it.
+- **📆 Schedule Calendar:** `getCalendarMonth` + `GET /api/schedules/calendar?month=YYYY-MM`; `calendar [YYYY-MM]` ASCII command; dashboard month widget (nav + click-a-day details, quiet flags).
+- **💓 Health + Heartbeat:** cheap `GET /api/health`; configurable heartbeat pings (`heartbeat [url] [mins]|test|off`, `GET/POST/DELETE /api/heartbeat`, test endpoint) auto-armed at server boot and hot-reloaded from CLI edits via the config watcher; dashboard Heartbeat card.
+- **📰 Weekly Digest:** `attendanceHistory.getWeeklyDigest` + daemon-scheduled Monday post (`digest [on|off|test]`, `GET/POST/DELETE /api/digest`, `POST /api/digest/test`); dashboard digest card with live 7-day summary; import/export carry it.
+- Web terminal help popover entries for all new commands; interactive planning menu extended (calendar, vacation, digest, heartbeat).
+
+### Fixed
+- CLI `import` now preserves imported quiet hours, holidays, vacation, heartbeat, and digest settings (previously dropped).
+- Standalone daemon (`src/bot.js`) now honors global holidays/quiet hours (config passed to worker) with skip-aware one-time handling.
+- Daemon reconnect scheduler ignores further drops once `ERROR` (no post-give-up spam).
+- Dashboard holiday/quiet/restore widgets refresh on every config fetch.
+
+---
+
 ## [4.0.0] - 2026-10-06
 
 ### Changed — Project renamed AttendanceBot → Croncord (no functionality changes)

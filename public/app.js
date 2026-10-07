@@ -6,13 +6,49 @@ let serverSearchQuery = '';
 let serverStatusFilter = 'ALL';
 let selectedServerIds = new Set();
 let pendingImportData = null;
-let desktopNotificationsEnabled = localStorage.getItem('attendanceBot_desktop_notifications') === 'true';
+let desktopNotificationsEnabled = (() => {
+    // Migration-aware read (v4.0 rename); the top-level migrator also backfills.
+    try {
+        const v = localStorage.getItem('croncord_desktop_notifications');
+        if (v !== null) return v === 'true';
+        const legacy = localStorage.getItem('attendanceBot_desktop_notifications');
+        return legacy === 'true';
+    } catch (e) { return false; }
+})();
 let rechartsRoot = null;
 let latestDailyData = null;
 let currentSessionLogs = [];
 let logSearchQuery = '';
 let logLevelFilter = 'ALL';
-let currentTheme = localStorage.getItem('attendancebot_theme') || 'dark';
+let currentTheme = 'dark'; // resolved post-migration by initTheme()
+
+// --- STORAGE KEY MIGRATION (v4.0 rename: AttendanceBot -> Croncord) ---
+// Pre-4.0 installs stored UI prefs under attendancebot*/attendanceBot* keys.
+// Copy them forward once so theme, notifications, targets, backups, terminal
+// skin and command history survive the rename; all new writes use croncord*.
+(function migrateLegacyStorageKeys() {
+    try {
+        const pairs = [
+            ['croncord_theme', ['attendancebot_theme']],
+            ['croncord_desktop_notifications', ['attendanceBot_desktop_notifications']],
+            ['croncord_daily_target', ['attendancebot_daily_target']],
+            ['croncord_local_backup', ['attendancebot_local_backup']],
+            ['croncord_autobackup_enabled', ['attendancebot_autobackup_enabled']],
+            ['croncord_terminal_skin', ['attendancebot_terminal_skin']],
+            ['croncord_cli_history', ['attendancebot_cli_history']],
+        ];
+        pairs.forEach(([next, legacy]) => {
+            if (localStorage.getItem(next) !== null) return;
+            for (const old of legacy) {
+                const v = localStorage.getItem(old);
+                if (v !== null) {
+                    localStorage.setItem(next, v);
+                    break;
+                }
+            }
+        });
+    } catch (e) { /* storage unavailable (private mode) — non-fatal */ }
+})();
 
 // --- INITIALIZATION ---
 document.addEventListener('DOMContentLoaded', () => {
@@ -22,10 +58,18 @@ document.addEventListener('DOMContentLoaded', () => {
     fetchConfig();
     fetchStatus();
     fetchDailyCheckinStats();
+    loadUpcoming();
+    loadCalendar();
+    loadHeartbeatUI();
+    loadDigestUI();
+    loadHolidaysUI();
+    loadRestorePointsUI();
     setupLogStream();
     initDesktopNotifications();
     setupKeyboardShortcuts();
     setInterval(fetchStatus, 5000);
+    setInterval(loadUpcoming, 30000);
+    setInterval(loadCalendar, 60000);
 });
 
 // --- TAB SWITCHING ---
@@ -81,12 +125,14 @@ async function fetchConfig(isRetry = false) {
 
         renderServers();
         updateStats();
+        if (typeof loadHolidaysUI === 'function') loadHolidaysUI();
+        if (typeof loadRestorePointsUI === 'function') loadRestorePointsUI();
         if (typeof performAutoBackup === 'function' && autoBackupEnabled) {
             performAutoBackup(true);
         }
     } catch (err) {
         consecutiveConfigFailures++;
-        console.warn('AttendanceBot config temporarily unavailable (retrying):', err && err.message ? err.message : err);
+        console.warn('Croncord config temporarily unavailable (retrying):', err && err.message ? err.message : err);
         if (!isRetry && consecutiveConfigFailures <= 3) {
             setTimeout(() => fetchConfig(true), 1500);
         }
@@ -130,7 +176,7 @@ async function fetchStatus(isRetry = false) {
     } catch (err) {
         consecutiveStatusFailures++;
         // Transient network blip, container proxy delay, or server restart
-        console.warn('AttendanceBot status temporarily unavailable (retrying):', err && err.message ? err.message : err);
+        console.warn('Croncord status temporarily unavailable (retrying):', err && err.message ? err.message : err);
         if (!isRetry && consecutiveStatusFailures <= 3) {
             setTimeout(() => fetchStatus(true), 1500);
         }
@@ -178,6 +224,17 @@ function updateDaemonStatusUI() {
         btn.className = 'flex items-center space-x-2 px-4 py-1.5 rounded-lg text-xs font-semibold shadow transition duration-150 bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer';
         btnIcon.className = 'fa-solid fa-play';
         btnText.innerText = 'Start Daemon';
+    }
+
+    // Self-heal reconnect indicator (daemon reports retry state in /api/status)
+    const rc = currentStatus.reconnect;
+    if (rc && (rc.pending || (rc.attempts || 0) > 0) && currentStatus.status !== 'STOPPED') {
+        dot.className = 'w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse';
+        const secs = rc.pending && rc.nextAt ? Math.max(0, Math.ceil((rc.nextAt - Date.now()) / 1000)) : 0;
+        text.className = 'text-amber-400 font-bold';
+        text.innerText = rc.pending
+            ? `Reconnecting (${rc.attempts}/${rc.maxAttempts}, retry in ${secs}s)`
+            : `Reconnect tried ${rc.attempts}/${rc.maxAttempts}`;
     }
 }
 
@@ -231,6 +288,544 @@ function updateStats() {
             statWebhook.innerText = 'Disabled';
             statWebhookSub.innerText = 'Optional notifications';
         }
+    }
+}
+
+// --- UPCOMING RUNS TIMELINE (v3.9, uses shared escapeHtml below) ---
+async function loadUpcoming() {
+    const box = document.getElementById('upcomingList');
+    if (!box) return;
+    try {
+        const res = await fetch('/api/schedules/upcoming?count=8');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (!data.success || !data.runs || data.runs.length === 0) {
+            box.innerHTML = '<p class="text-discord-muted">No upcoming runs — no active schedules found.</p>';
+            return;
+        }
+        box.innerHTML = data.runs.map((r, i) => {
+            const at = new Date(r.at);
+            const diffMs = Math.max(0, at.getTime() - Date.now());
+            const mins = Math.floor(diffMs / 60000);
+            const inStr = mins < 1 ? 'any moment' : (mins < 60 ? `in ${mins}m` : `in ${Math.floor(mins / 60)}h ${mins % 60}m`);
+            const flags = [];
+            if (r.oneTime) flags.push('<span class="px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">ONE-TIME</span>');
+            if (r.quiet) flags.push('<span class="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">QUIET-HOURS</span>');
+            return `<div class="flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-discord-card/60 border border-discord-border/60">
+                <div class="min-w-0">
+                    <span class="text-discord-muted mono">#${i + 1}</span>
+                    <span class="font-semibold text-white">${escapeHtml(r.scheduleLabel)}</span>
+                    <span class="text-discord-muted">on ${escapeHtml(r.serverName)}</span>
+                    ${flags.join(' ')}
+                </div>
+                <div class="text-right shrink-0">
+                    <div class="text-white font-semibold mono">${escapeHtml(at.toLocaleString())}</div>
+                    <div class="text-discord-muted">${escapeHtml(inStr)}</div>
+                </div>
+            </div>`;
+        }).join('');
+    } catch (err) {
+        box.innerHTML = '<p class="text-discord-muted">Upcoming runs unavailable (server unreachable).</p>';
+    }
+}
+
+// --- MONTHLY FIRING CALENDAR ---
+let calYear = null;
+let calMonth = null; // 1-12
+let calData = null;
+
+function shiftCalendarMonth(delta) {
+    if (calYear === null) {
+        const now = new Date();
+        calYear = now.getFullYear();
+        calMonth = now.getMonth() + 1;
+    }
+    calMonth += delta;
+    while (calMonth < 1) { calMonth += 12; calYear--; }
+    while (calMonth > 12) { calMonth -= 12; calYear++; }
+    loadCalendar();
+}
+
+async function loadCalendar() {
+    const grid = document.getElementById('calendarGrid');
+    if (!grid) return;
+    if (calYear === null) {
+        const now = new Date();
+        calYear = now.getFullYear();
+        calMonth = now.getMonth() + 1;
+    }
+    const label = document.getElementById('calendarMonthLabel');
+    try {
+        const res = await fetch(`/api/schedules/calendar?month=${calYear}-${String(calMonth).padStart(2, '0')}`);
+        const data = await res.json();
+        if (!res.ok || !data.success) throw new Error((data && data.error) || `HTTP ${res.status}`);
+        calData = data;
+        if (label) {
+            const names = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+            label.textContent = `${names[data.monthNum - 1]} ${data.year}`;
+        }
+        const cells = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'].map((d) =>
+            `<div class="text-center text-[10px] font-bold text-discord-muted uppercase py-1">${d}</div>`).join('');
+        const blanks = Array.from({ length: data.firstWeekday }, () => '<div></div>').join('');
+        const todayKey = (() => {
+            const t = new Date();
+            return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+        })();
+        const dayCells = data.days.map((d) => {
+            const dayNum = parseInt(d.date.slice(8, 10), 10);
+            const isToday = d.date === todayKey;
+            const tip = d.count > 0
+                ? `${d.count} run(s): ` + [...new Set(d.runs.map((r) => `${r.scheduleLabel} (${r.serverName})`))].join(', ')
+                : 'No firings';
+            const cls = d.count > 0
+                ? 'bg-violet-500/20 border-violet-500/40 text-white font-bold cursor-pointer hover:bg-violet-500/30'
+                : 'bg-discord-card/40 border-discord-border/40 text-discord-muted';
+            return `<button onclick="selectCalendarDay('${d.date}')" title="${escapeHtml(tip)}" class="rounded-lg border px-1 py-1.5 text-center transition ${cls} ${isToday ? 'ring-1 ring-indigo-400' : ''}">
+                <div class="mono leading-none">${dayNum}</div>
+                ${d.count > 0 ? `<div class="text-[10px] leading-none mt-0.5 text-violet-300">●${d.count}</div>` : '<div class="text-[10px] leading-none mt-0.5">&nbsp;</div>'}
+            </button>`;
+        }).join('');
+        grid.innerHTML = cells + blanks + dayCells;
+        const detail = document.getElementById('calendarDayDetail');
+        if (detail) detail.innerHTML = '';
+    } catch (err) {
+        grid.innerHTML = '<p class="text-discord-muted col-span-7">Calendar unavailable.</p>';
+    }
+}
+
+function selectCalendarDay(dateStr) {
+    const detail = document.getElementById('calendarDayDetail');
+    if (!detail || !calData) return;
+    const day = (calData.days || []).find((d) => d.date === dateStr);
+    if (!day || day.count === 0) {
+        detail.innerHTML = `<p class="text-discord-muted">${escapeHtml(dateStr)} — no firings scheduled.</p>`;
+        return;
+    }
+    detail.innerHTML = `<p class="text-white font-semibold mb-1">${escapeHtml(dateStr)} — ${day.count} run(s):</p>` +
+        day.runs.map((r) => {
+            const at = new Date(r.at);
+            return `<div class="flex items-center justify-between gap-2 px-3 py-1.5 rounded-lg bg-discord-card/60 border border-discord-border/60">
+                <span><span class="font-semibold text-white">${escapeHtml(r.scheduleLabel)}</span>
+                <span class="text-discord-muted">on ${escapeHtml(r.serverName)}</span>
+                ${r.quiet ? '<span class="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">QUIET-HOURS</span>' : ''}</span>
+                <span class="text-discord-muted mono shrink-0">${escapeHtml(at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))}</span>
+            </div>`;
+        }).join('');
+}
+
+// --- WEEKLY DIGEST UI ---
+async function loadDigestUI() {
+    const statusEl = document.getElementById('digestStatusText');
+    const summaryBox = document.getElementById('digestSummaryBox');
+    if (!statusEl) return;
+    try {
+        const res = await fetch('/api/digest');
+        const data = await res.json();
+        const d = data.digest || {};
+        if (d.enabled) {
+            statusEl.innerHTML = `Enabled — posts every <span class="text-white font-semibold">${escapeHtml(d.day || 'monday')} at ${escapeHtml(d.time || '09:00')}</span>.`;
+            const dayInput = document.getElementById('digestDayInput');
+            const timeInput = document.getElementById('digestTimeInput');
+            if (dayInput) dayInput.value = d.day || 'monday';
+            if (timeInput) timeInput.value = d.time || '09:00';
+        } else {
+            statusEl.innerText = 'Off — enable a weekly auto-post below.';
+        }
+        const s = data.summary;
+        if (summaryBox && s) {
+            summaryBox.innerHTML = `Last 7 days (${escapeHtml(s.from)} → ${escapeHtml(s.to)}): ` +
+                `<span class="text-white font-semibold">${s.total} runs</span> · ` +
+                `<span class="text-emerald-400">✅ ${s.success}</span> · ` +
+                `<span class="text-rose-400">❌ ${s.failed}</span> · ` +
+                `<span class="text-amber-300">⏸️ ${s.skipped}</span> · ` +
+                `<span class="text-white">${escapeHtml(s.successRate)} success</span>`;
+        }
+    } catch (err) {
+        statusEl.innerText = 'Digest state unavailable.';
+    }
+}
+
+async function saveDigestUI() {
+    const day = ((document.getElementById('digestDayInput') || {}).value || 'monday').toLowerCase();
+    const time = ((document.getElementById('digestTimeInput') || {}).value || '09:00');
+    try {
+        const res = await fetch('/api/digest', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: true, day, time }),
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+            showNotificationToast(`Weekly digest enabled: ${day} at ${time}.`, 'success');
+            await loadDigestUI();
+        } else {
+            showNotificationToast(data.error || 'Failed to enable digest.', 'danger');
+        }
+    } catch (err) {
+        showNotificationToast(`Error: ${err.message}`, 'danger');
+    }
+}
+
+async function testDigestUI() {
+    try {
+        const res = await fetch('/api/digest/test', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok && data.success) {
+            showNotificationToast('Digest posted — check your webhook channel.', 'success');
+        } else {
+            showNotificationToast(data.error || data.message || 'Digest failed.', 'danger');
+        }
+    } catch (err) {
+        showNotificationToast(`Error: ${err.message}`, 'danger');
+    }
+}
+
+async function clearDigestUI() {
+    try {
+        const res = await fetch('/api/digest', { method: 'DELETE' });
+        const data = await res.json();
+        if (res.ok && data.success) {
+            showNotificationToast('Weekly digest disabled.', 'success');
+            await loadDigestUI();
+        } else {
+            showNotificationToast(data.error || 'Failed to disable.', 'danger');
+        }
+    } catch (err) {
+        showNotificationToast(`Error: ${err.message}`, 'danger');
+    }
+}
+
+// --- HEARTBEAT MONITOR UI ---
+async function loadHeartbeatUI() {
+    const statusEl = document.getElementById('heartbeatStatusText');
+    if (!statusEl) return;
+    try {
+        const res = await fetch('/api/heartbeat');
+        const data = await res.json();
+        const hb = data.heartbeat;
+        if (hb && hb.url) {
+            const urlInput = document.getElementById('heartbeatUrlInput');
+            const minInput = document.getElementById('heartbeatMinutesInput');
+            if (urlInput && !urlInput.value) urlInput.value = hb.url;
+            if (minInput) minInput.value = hb.intervalMinutes || 15;
+            const last = data.state && data.state.lastPingAt
+                ? `Last ping: <span class="text-white mono">${escapeHtml(new Date(data.state.lastPingAt).toLocaleString())}</span> (${escapeHtml(data.state.lastStatus || '')})`
+                : 'No pings sent yet.';
+            statusEl.innerHTML = `Armed: <span class="text-white font-semibold mono">${escapeHtml(hb.url)}</span> every ${hb.intervalMinutes || 15}m. ${last}`;
+        } else {
+            statusEl.innerText = 'Off — no heartbeat URL configured.';
+        }
+    } catch (err) {
+        statusEl.innerText = 'Heartbeat state unavailable.';
+    }
+}
+
+async function saveHeartbeatUI() {
+    const url = ((document.getElementById('heartbeatUrlInput') || {}).value || '').trim();
+    const minutes = parseInt(((document.getElementById('heartbeatMinutesInput') || {}).value || '15'), 10) || 15;
+    if (!url) {
+        showNotificationToast('Enter a heartbeat URL first.', 'warning');
+        return;
+    }
+    try {
+        const res = await fetch('/api/heartbeat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url, intervalMinutes: minutes }),
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+            showNotificationToast(`Heartbeat armed: every ${minutes}m.`, 'success');
+            await loadHeartbeatUI();
+        } else {
+            showNotificationToast(data.error || 'Failed to save heartbeat.', 'danger');
+        }
+    } catch (err) {
+        showNotificationToast(`Error saving heartbeat: ${err.message}`, 'danger');
+    }
+}
+
+async function testHeartbeatUI() {
+    try {
+        const url = ((document.getElementById('heartbeatUrlInput') || {}).value || '').trim();
+        const res = await fetch('/api/heartbeat/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(url ? { url } : {}),
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+            showNotificationToast(`Test ping delivered (HTTP ${data.statusCode}).`, 'success');
+            await loadHeartbeatUI();
+        } else {
+            showNotificationToast(data.error || 'Test ping failed.', 'danger');
+        }
+    } catch (err) {
+        showNotificationToast(`Error pinging: ${err.message}`, 'danger');
+    }
+}
+
+async function clearHeartbeatUI() {
+    try {
+        const res = await fetch('/api/heartbeat', { method: 'DELETE' });
+        const data = await res.json();
+        if (res.ok && data.success) {
+            const urlInput = document.getElementById('heartbeatUrlInput');
+            if (urlInput) urlInput.value = '';
+            showNotificationToast('Heartbeat disarmed.', 'success');
+            await loadHeartbeatUI();
+        } else {
+            showNotificationToast(data.error || 'Failed to disarm.', 'danger');
+        }
+    } catch (err) {
+        showNotificationToast(`Error: ${err.message}`, 'danger');
+    }
+}
+
+// --- HOLIDAYS & QUIET HOURS UI (v3.9) ---
+async function loadHolidaysUI() {
+    const list = document.getElementById('holidaysList');
+    if (!list) return;
+    try {
+        const res = await fetch('/api/holidays');
+        const data = await res.json();
+        const holidays = data.holidays || [];
+        if (holidays.length === 0) {
+            list.innerHTML = '<p class="text-discord-muted">No holidays configured — runs fire every scheduled day.</p>';
+        } else {
+            list.innerHTML = holidays.map((h) => `
+                <div class="flex items-center justify-between gap-2 px-3 py-1.5 rounded-lg bg-discord-card/60 border border-discord-border/60">
+                    <span><span class="text-white font-semibold mono">${escapeHtml(h.date)}</span> <span class="text-discord-muted">— ${escapeHtml(h.name)}</span></span>
+                    <button onclick="removeHolidayUI('${escapeHtml(h.date)}')" class="text-rose-400 hover:text-rose-300 text-xs cursor-pointer" title="Remove holiday">
+                        <i class="fa-solid fa-trash-can"></i>
+                    </button>
+                </div>`).join('');
+        }
+    } catch (err) {
+        list.innerHTML = '<p class="text-discord-muted">Holidays unavailable.</p>';
+    }
+
+    await loadVacationUI();
+
+    try {
+        const qres = await fetch('/api/quiet');
+        const qdata = await qres.json();
+        const cur = document.getElementById('quietCurrentText');
+        const qs = document.getElementById('quietStartInput');
+        const qe = document.getElementById('quietEndInput');
+        if (qdata.global) {
+            if (cur) cur.innerHTML = `Active window: <span class="text-white font-semibold mono">${escapeHtml(qdata.global.start)}–${escapeHtml(qdata.global.end)}</span> (plus ${(qdata.perServer || []).length} server override(s))`;
+            if (qs) qs.value = qdata.global.start || '';
+            if (qe) qe.value = qdata.global.end || '';
+        } else if (cur) {
+            cur.innerText = 'Not set — runs fire at their scheduled times.';
+        }
+    } catch (err) { /* quiet display is best-effort */ }
+}
+
+async function addHolidayUI() {
+    const dateEl = document.getElementById('holidayDateInput');
+    const nameEl = document.getElementById('holidayNameInput');
+    const date = (dateEl && dateEl.value) || '';
+    const name = (nameEl && nameEl.value.trim()) || '';
+    if (!date || !name) {
+        showNotificationToast('Pick a date and enter a holiday name.', 'warning');
+        return;
+    }
+    try {
+        const res = await fetch('/api/holidays', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ date, name }),
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+            showNotificationToast(`Holiday added: ${date} — ${name}.`, 'success');
+            if (dateEl) dateEl.value = '';
+            if (nameEl) nameEl.value = '';
+            await loadHolidaysUI();
+        } else {
+            showNotificationToast(data.error || 'Failed to add holiday.', 'danger');
+        }
+    } catch (err) {
+        showNotificationToast(`Error adding holiday: ${err.message}`, 'danger');
+    }
+}
+
+async function removeHolidayUI(date) {
+    try {
+        const res = await fetch(`/api/holidays/${encodeURIComponent(date)}`, { method: 'DELETE' });
+        const data = await res.json();
+        if (res.ok && data.success) {
+            showNotificationToast(`Holiday on ${date} removed.`, 'success');
+            await loadHolidaysUI();
+        } else {
+            showNotificationToast(data.error || 'Failed to remove holiday.', 'danger');
+        }
+    } catch (err) {
+        showNotificationToast(`Error removing holiday: ${err.message}`, 'danger');
+    }
+}
+
+async function saveQuietUI() {
+    const start = (document.getElementById('quietStartInput') || {}).value || '';
+    const end = (document.getElementById('quietEndInput') || {}).value || '';
+    if (!start || !end) {
+        showNotificationToast('Enter both window start and end (HH:MM).', 'warning');
+        return;
+    }
+    try {
+        const res = await fetch('/api/quiet', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ start, end }),
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+            showNotificationToast(`Quiet hours saved: ${start}–${end}.`, 'success');
+            await loadHolidaysUI();
+        } else {
+            showNotificationToast(data.error || 'Failed to save quiet hours.', 'danger');
+        }
+    } catch (err) {
+        showNotificationToast(`Error saving quiet hours: ${err.message}`, 'danger');
+    }
+}
+
+async function clearQuietUI() {
+    try {
+        const res = await fetch('/api/quiet', { method: 'DELETE' });
+        const data = await res.json();
+        if (res.ok && data.success) {
+            const qs = document.getElementById('quietStartInput');
+            const qe = document.getElementById('quietEndInput');
+            if (qs) qs.value = '';
+            if (qe) qe.value = '';
+            showNotificationToast('Quiet hours cleared everywhere.', 'success');
+            await loadHolidaysUI();
+        } else {
+            showNotificationToast(data.error || 'Failed to clear quiet hours.', 'danger');
+        }
+    } catch (err) {
+        showNotificationToast(`Error clearing quiet hours: ${err.message}`, 'danger');
+    }
+}
+
+// --- VACATION MODE UI ---
+async function loadVacationUI() {
+    const statusEl = document.getElementById('vacationStatusText');
+    if (!statusEl) return;
+    try {
+        const res = await fetch('/api/vacation');
+        const data = await res.json();
+        if (data.active) {
+            statusEl.innerHTML = `Armed until <span class="text-white font-semibold mono">${escapeHtml(data.until)}</span>${data.note ? ` — ${escapeHtml(data.note)}` : ''} <span class="text-amber-300">(auto-resumes after)</span>`;
+            const untilInput = document.getElementById('vacationUntilInput');
+            if (untilInput && !untilInput.value) untilInput.value = data.until;
+        } else {
+            statusEl.innerText = 'Off — schedules fire normally.';
+        }
+    } catch (err) {
+        statusEl.innerText = 'Vacation state unavailable.';
+    }
+}
+
+async function armVacationUI() {
+    const until = ((document.getElementById('vacationUntilInput') || {}).value || '').trim();
+    const note = ((document.getElementById('vacationNoteInput') || {}).value || '').trim();
+    if (!until) {
+        showNotificationToast('Pick an end date (YYYY-MM-DD) for the vacation.', 'warning');
+        return;
+    }
+    try {
+        const res = await fetch('/api/vacation', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ until, note }),
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+            showNotificationToast(`Vacation armed until ${until}.`, 'success');
+            await loadVacationUI();
+            await loadUpcoming();
+        } else {
+            showNotificationToast(data.error || 'Failed to arm vacation.', 'danger');
+        }
+    } catch (err) {
+        showNotificationToast(`Error arming vacation: ${err.message}`, 'danger');
+    }
+}
+
+async function cancelVacationUI() {
+    try {
+        const res = await fetch('/api/vacation', { method: 'DELETE' });
+        const data = await res.json();
+        if (res.ok && data.success) {
+            showNotificationToast('Vacation cancelled — schedules resumed.', 'success');
+            await loadVacationUI();
+            await loadUpcoming();
+        } else {
+            showNotificationToast(data.error || 'Failed to cancel vacation.', 'danger');
+        }
+    } catch (err) {
+        showNotificationToast(`Error cancelling vacation: ${err.message}`, 'danger');
+    }
+}
+
+// --- SERVER-SIDE RESTORE POINTS UI (v3.9) ---
+async function loadRestorePointsUI() {
+    const box = document.getElementById('restorePointsList');
+    if (!box) return;
+    try {
+        const res = await fetch('/api/config/backups');
+        const data = await res.json();
+        const snaps = data.backups || [];
+        if (snaps.length === 0) {
+            box.innerHTML = '<p class="text-discord-muted">No server restore points yet — one is saved before every change.</p>';
+            return;
+        }
+        box.innerHTML = snaps.map((s, i) => `
+            <div class="flex items-center justify-between gap-2 px-3 py-1.5 rounded-lg bg-discord-card/60 border border-discord-border/60">
+                <span class="min-w-0"><span class="text-discord-muted mono">#${i + 1}</span>
+                <span class="text-white mono truncate">${escapeHtml(s.file)}</span>
+                <span class="text-discord-muted">${(s.size / 1024).toFixed(1)} KB</span></span>
+                <button onclick="restorePointUI('${escapeHtml(s.file)}')" class="px-2.5 py-1 rounded-md text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white transition cursor-pointer shrink-0">Restore</button>
+            </div>`).join('');
+    } catch (err) {
+        box.innerHTML = '<p class="text-discord-muted">Restore points unavailable.</p>';
+    }
+}
+
+async function restorePointUI(file) {
+    const confirmed = await showConfirmDialog({
+        title: 'Restore Configuration',
+        message: `Roll back to server restore point "${file}"? A pre-restore snapshot is saved first, so this is reversible.`,
+        details: [{ label: 'Restore Point', value: file }],
+        icon: 'fa-solid fa-rotate-left',
+        iconColor: 'emerald',
+        confirmText: 'Restore',
+        confirmClass: 'bg-emerald-600 hover:bg-emerald-500 text-white',
+        cancelText: 'Cancel'
+    });
+    if (!confirmed) return;
+    try {
+        const res = await fetch('/api/config/restore', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ file }),
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+            showNotificationToast(`Restored from "${file}".`, 'success');
+            await fetchConfig();
+            await fetchStatus();
+            await loadRestorePointsUI();
+            await loadHolidaysUI();
+        } else {
+            showNotificationToast(data.error || 'Restore failed.', 'danger');
+        }
+    } catch (err) {
+        showNotificationToast(`Error restoring: ${err.message}`, 'danger');
     }
 }
 
@@ -337,7 +932,7 @@ async function fetchDailyCheckinStats() {
         const statsData = await res.json();
         updateCheckinChart(statsData);
     } catch (err) {
-        console.warn('AttendanceBot daily stats temporarily unavailable:', err && err.message ? err.message : err);
+        console.warn('Croncord daily stats temporarily unavailable:', err && err.message ? err.message : err);
     } finally {
         if (refreshIcon) refreshIcon.classList.remove('fa-spin');
     }
@@ -559,7 +1154,7 @@ function renderRechartsCheckins(dailyData) {
 }
 
 // --- DAILY TARGET FEATURE ---
-let dailyTargetGoal = parseInt(localStorage.getItem('attendancebot_daily_target') || '10', 10);
+let dailyTargetGoal = parseInt(localStorage.getItem('croncord_daily_target') || localStorage.getItem('attendancebot_daily_target') || '10', 10);
 if (isNaN(dailyTargetGoal) || dailyTargetGoal < 1) dailyTargetGoal = 10;
 
 function initDailyTargetUI() {
@@ -575,7 +1170,7 @@ function handleDailyTargetChange(val) {
     if (parsed > 500) parsed = 500;
     dailyTargetGoal = parsed;
     try {
-        localStorage.setItem('attendancebot_daily_target', String(dailyTargetGoal));
+        localStorage.setItem('croncord_daily_target', String(dailyTargetGoal));
     } catch (e) {}
     initDailyTargetUI();
     if (latestDailyData) {
@@ -642,8 +1237,8 @@ function updateDailyTargetProgress(dailyList) {
 }
 
 // --- LOCAL AUTO-BACKUP & RESTORE ---
-const BACKUP_STORAGE_KEY = 'attendancebot_local_backup';
-const AUTOBACKUP_ENABLED_KEY = 'attendancebot_autobackup_enabled';
+const BACKUP_STORAGE_KEY = 'croncord_local_backup';
+const AUTOBACKUP_ENABLED_KEY = 'croncord_autobackup_enabled';
 let autoBackupEnabled = localStorage.getItem(AUTOBACKUP_ENABLED_KEY) !== 'false'; // default true
 
 function initAutoBackupUI() {
@@ -715,7 +1310,7 @@ function performAutoBackup(silent = false) {
     });
 
     const snapshot = {
-        app: 'AttendanceBot',
+            app: 'Croncord',
         timestamp: new Date().toISOString(),
         serverCount: currentConfig.servers.length,
         scheduleCount: schedCount,
@@ -751,7 +1346,7 @@ function downloadConfigBackupJson() {
     });
 
     const exportData = {
-        app: 'AttendanceBot',
+            app: 'Croncord',
         version: '3.2.0',
         exportedAt: new Date().toISOString(),
         serverCount: (currentConfig.servers || []).length,
@@ -766,7 +1361,7 @@ function downloadConfigBackupJson() {
     const a = document.createElement('a');
     a.href = url;
     const dateStamp = new Date().toISOString().slice(0, 10);
-    a.download = `attendancebot-config-backup-${dateStamp}.json`;
+    a.download = `croncord-config-backup-${dateStamp}.json`;
     document.body.appendChild(a);
     a.click();
 
@@ -892,15 +1487,15 @@ async function toggleDesktopNotifications() {
             const permission = await Notification.requestPermission();
             if (permission === 'granted') {
                 desktopNotificationsEnabled = true;
-                localStorage.setItem('attendanceBot_desktop_notifications', 'true');
+                localStorage.setItem('croncord_desktop_notifications', 'true');
                 triggerLocalSystemAlert({
-                    title: '⚡ AttendanceBot Alerts Active',
+                    title: '⚡ Croncord Alerts Active',
                     body: 'You will receive local desktop alerts whenever an attendance task completes successfully!'
                 });
                 showNotificationToast('Desktop notifications enabled successfully!', 'success');
             } else {
                 desktopNotificationsEnabled = false;
-                localStorage.setItem('attendanceBot_desktop_notifications', 'false');
+                localStorage.setItem('croncord_desktop_notifications', 'false');
                 showNotificationToast('Notification permission was not granted.', 'warning');
             }
         } catch (err) {
@@ -908,10 +1503,10 @@ async function toggleDesktopNotifications() {
         }
     } else if (Notification.permission === 'granted') {
         desktopNotificationsEnabled = !desktopNotificationsEnabled;
-        localStorage.setItem('attendanceBot_desktop_notifications', desktopNotificationsEnabled ? 'true' : 'false');
+        localStorage.setItem('croncord_desktop_notifications', desktopNotificationsEnabled ? 'true' : 'false');
         if (desktopNotificationsEnabled) {
             triggerLocalSystemAlert({
-                title: '⚡ AttendanceBot Alerts Resumed',
+                title: '⚡ Croncord Alerts Resumed',
                 body: 'System notifications are active for scheduled attendance tasks.'
             });
             showNotificationToast('Desktop alerts enabled.', 'success');
@@ -933,7 +1528,7 @@ function triggerLocalSystemAlert({ title, body, icon }) {
     try {
         const notif = new Notification(title || '⚡ Attendance Completed', {
             body: body || 'Attendance task executed successfully.',
-            tag: 'attendancebot-exec-' + Date.now(),
+            tag: 'croncord-exec-' + Date.now(),
             icon: icon || 'https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/26a1.png',
             silent: false
         });
@@ -1547,7 +2142,7 @@ function exportConfigJSON() {
     }
 
     const exportData = {
-        app: 'AttendanceBot',
+            app: 'Croncord',
         version: '3.2.0',
         exportedAt: new Date().toISOString(),
         globalWebhookUrl: currentConfig.globalWebhookUrl || '',
@@ -1560,7 +2155,7 @@ function exportConfigJSON() {
     const a = document.createElement('a');
     const dateStamp = new Date().toISOString().slice(0, 10);
     a.href = url;
-    a.download = `attendancebot-servers-config-${dateStamp}.json`;
+    a.download = `croncord-servers-config-${dateStamp}.json`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -1630,7 +2225,7 @@ function renderImportModalState(fileName, validation, rawData) {
             statusTitle.innerText = 'Schema Verification Passed';
         }
         if (statusDesc) {
-            statusDesc.innerText = `All ${srvCount} server profile(s) and ${scCount} schedule(s) conform to AttendanceBot v3 specification.`;
+            statusDesc.innerText = `All ${srvCount} server profile(s) and ${scCount} schedule(s) conform to the Croncord configuration specification.`;
         }
 
         if (errContainer) errContainer.classList.add('hidden');
@@ -1967,7 +2562,7 @@ function renderServers() {
         const countStatus = document.getElementById('searchResultCount');
         if (countStatus) countStatus.innerText = 'No servers configured';
 
-        const hasLocalBackup = Boolean(localStorage.getItem('attendancebot_local_backup'));
+        const hasLocalBackup = Boolean(localStorage.getItem('croncord_local_backup'));
 
         container.innerHTML = `
             <div class="bg-discord-dark rounded-xl p-8 text-center border border-discord-border space-y-3">
@@ -2190,6 +2785,9 @@ function renderServers() {
                     <button onclick="deleteServer('${server.id}')" title="Delete Server" class="p-2 rounded-lg text-xs bg-discord-card hover:bg-rose-500/20 text-rose-400 border border-discord-border transition cursor-pointer">
                         <i class="fa-solid fa-trash"></i>
                     </button>
+                    <button onclick="openCloneServerModal('${server.id}')" title="Clone Server (duplicate with fresh IDs)" class="p-2 rounded-lg text-xs bg-discord-card hover:bg-discord-border text-discord-text border border-discord-border transition cursor-pointer">
+                        <i class="fa-solid fa-copy text-indigo-300"></i>
+                    </button>
                     <button onclick="openAddScheduleModal('${server.id}')" class="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-discord-blurple hover:bg-indigo-600 text-white shadow transition cursor-pointer">
                         <i class="fa-solid fa-plus"></i>
                         <span>Add Schedule</span>
@@ -2260,6 +2858,11 @@ function renderServers() {
                 ${!server.schedules || server.schedules.length === 0 ? `
                     <p class="text-xs text-discord-muted italic">No schedules defined for this server yet. Click "Add Schedule" to configure daily times.</p>
                 ` : `
+                    <div class="flex items-center justify-end gap-2 mb-2">
+                        <span class="text-[11px] text-discord-muted uppercase tracking-wider font-semibold">Bulk:</span>
+                        <button onclick="bulkSchedulesUI('${server.id}', 'enable')" title="Enable every routine on this server" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-emerald-500/15 hover:bg-emerald-600 text-emerald-300 hover:text-white border border-emerald-500/30 transition cursor-pointer">Enable all</button>
+                        <button onclick="bulkSchedulesUI('${server.id}', 'disable')" title="Pause every routine on this server" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-amber-500/15 hover:bg-amber-600 text-amber-300 hover:text-white border border-amber-500/30 transition cursor-pointer">Pause all</button>
+                    </div>
                     <div class="overflow-x-auto">
                         <table class="w-full text-left text-xs">
                             <thead>
@@ -2343,6 +2946,15 @@ function renderServers() {
                                             </button>
                                         </td>
                                         <td class="py-2.5 text-right space-x-1.5 whitespace-nowrap">
+                                            <!-- Preview Dry-Run Button -->
+                                            <button
+                                                onclick="previewScheduleNow('${server.id}', '${sched.id}')"
+                                                title="Preview: show the exact resolved post text without sending anything"
+                                                class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-500/15 hover:bg-indigo-600 text-indigo-300 hover:text-white border border-indigo-500/30 hover:border-indigo-500 text-xs font-semibold shadow-xs transition duration-150 cursor-pointer active:scale-95"
+                                            >
+                                                <i class="fa-solid fa-eye text-[9px] text-indigo-400"></i>
+                                                <span>Preview</span>
+                                            </button>
                                             <!-- Test Run Play Button -->
                                             <button
                                                 id="btn-test-run-${server.id}-${sched.id}"
@@ -2486,6 +3098,9 @@ function openAddServerModal() {
     document.getElementById('modalServerChannelId').value = '';
     document.getElementById('modalServerWebhook').value = '';
     document.getElementById('modalServerActive').checked = true;
+    document.getElementById('modalServerQuietStart').value = '';
+    document.getElementById('modalServerQuietEnd').value = '';
+    document.getElementById('modalServerIgnoreHolidays').checked = false;
     const modal = document.getElementById('serverModal');
     modal.classList.remove('hidden');
     modal.classList.add('flex');
@@ -2501,6 +3116,9 @@ function openEditServerModal(serverId) {
     document.getElementById('modalServerChannelId').value = server.channelId;
     document.getElementById('modalServerWebhook').value = server.webhookUrl || '';
     document.getElementById('modalServerActive').checked = Boolean(server.active);
+    document.getElementById('modalServerQuietStart').value = (server.quietHours && server.quietHours.start) || '';
+    document.getElementById('modalServerQuietEnd').value = (server.quietHours && server.quietHours.end) || '';
+    document.getElementById('modalServerIgnoreHolidays').checked = Boolean(server.ignoreHolidays);
     const modal = document.getElementById('serverModal');
     modal.classList.remove('hidden');
     modal.classList.add('flex');
@@ -2512,6 +3130,75 @@ function closeServerModal() {
     modal.classList.remove('flex');
 }
 
+// --- CLONE SERVER + BULK SCHEDULE ACTIONS ---
+function openCloneServerModal(serverId) {
+    const server = (currentConfig.servers || []).find((s) => String(s.id) === String(serverId));
+    if (!server) return;
+    document.getElementById('modalCloneServerId').value = server.id;
+    document.getElementById('modalCloneName').value = `${server.name} (copy)`;
+    document.getElementById('modalCloneChannelId').value = '';
+    const title = document.getElementById('cloneModalTitle');
+    if (title) title.textContent = `Clone "${server.name}"`;
+    const modal = document.getElementById('cloneModal');
+    modal.classList.remove('hidden');
+    modal.classList.add('flex');
+}
+
+function closeCloneServerModal() {
+    const modal = document.getElementById('cloneModal');
+    if (!modal) return;
+    modal.classList.add('hidden');
+    modal.classList.remove('flex');
+}
+
+async function confirmCloneServer(e) {
+    e.preventDefault();
+    const serverId = document.getElementById('modalCloneServerId').value;
+    const name = document.getElementById('modalCloneName').value.trim();
+    const channelId = document.getElementById('modalCloneChannelId').value.trim();
+    if (!name || !channelId) {
+        showNotificationToast('New name and channel ID are required.', 'warning');
+        return;
+    }
+    try {
+        const res = await fetch(`/api/servers/${encodeURIComponent(serverId)}/clone`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, channelId }),
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+            closeCloneServerModal();
+            showNotificationToast(`Cloned → "${data.server.name}" with ${(data.server.schedules || []).length} schedule(s).`, 'success');
+            await fetchConfig();
+            await fetchStatus();
+        } else {
+            showNotificationToast(data.error || 'Clone failed.', 'danger');
+        }
+    } catch (err) {
+        showNotificationToast(`Error cloning server: ${err.message}`, 'danger');
+    }
+}
+
+async function bulkSchedulesUI(serverId, action) {
+    try {
+        const res = await fetch(`/api/servers/${encodeURIComponent(serverId)}/schedules/bulk-action`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action }),
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+            showNotificationToast(`${action === 'enable' ? 'Enabled' : 'Paused'} ${data.count} schedule(s).`, 'success');
+            await fetchConfig();
+        } else {
+            showNotificationToast(data.error || 'Bulk action failed.', 'danger');
+        }
+    } catch (err) {
+        showNotificationToast(`Error: ${err.message}`, 'danger');
+    }
+}
+
 async function handleSaveServer(e) {
     e.preventDefault();
     const id = document.getElementById('modalServerId').value;
@@ -2519,6 +3206,10 @@ async function handleSaveServer(e) {
     const channelId = document.getElementById('modalServerChannelId').value.trim();
     const webhookUrl = document.getElementById('modalServerWebhook').value.trim();
     const active = document.getElementById('modalServerActive').checked;
+    const quietStart = document.getElementById('modalServerQuietStart').value;
+    const quietEnd = document.getElementById('modalServerQuietEnd').value;
+    const ignoreHolidays = document.getElementById('modalServerIgnoreHolidays').checked;
+    const quietHours = (quietStart && quietEnd) ? { start: quietStart, end: quietEnd } : null;
 
     if (!name || !channelId) {
         showNotificationToast('Server name and Channel ID are required.', 'warning');
@@ -2552,7 +3243,7 @@ async function handleSaveServer(e) {
             res = await fetch(`/api/servers/${id}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name, channelId, webhookUrl, active }),
+                body: JSON.stringify({ name, channelId, webhookUrl, active, quietHours, ignoreHolidays }),
             });
         } else {
             // Create
@@ -2736,6 +3427,7 @@ function openAddScheduleModal(serverId, options = {}) {
     document.getElementById('modalScheduleLabel').value = '09:00 (Weekdays)';
     delete document.getElementById('modalScheduleLabel').dataset.manual;
     document.getElementById('modalScheduleMessage').value = 'Present';
+    document.getElementById('modalSchedulePool').value = '';
     document.getElementById('modalScheduleEmoji').value = '👍';
     document.getElementById('modalScheduleTargetMessageId').value = '';
     document.getElementById('modalScheduleJitter').value = '10';
@@ -2797,6 +3489,7 @@ function openEditScheduleModal(serverId, scheduleId) {
     document.getElementById('modalScheduleLabel').value = schedule.label;
     document.getElementById('modalScheduleLabel').dataset.manual = 'true';
     document.getElementById('modalScheduleMessage').value = schedule.message || 'Present';
+    document.getElementById('modalSchedulePool').value = Array.isArray(schedule.messagePool) ? schedule.messagePool.join('\n') : '';
     document.getElementById('modalScheduleEmoji').value = schedule.emoji || '👍';
     document.getElementById('modalScheduleTargetMessageId').value = schedule.targetMessageId || '';
     document.getElementById('modalScheduleJitter').value = schedule.maxJitterMinutes || 10;
@@ -2835,6 +3528,8 @@ async function handleSaveSchedule(e) {
     const targetMessageId = document.getElementById('modalScheduleTargetMessageId').value;
     const jitter = parseInt(document.getElementById('modalScheduleJitter').value, 10) || 0;
     const active = document.getElementById('modalScheduleActive').checked;
+    const messagePool = document.getElementById('modalSchedulePool').value
+        .split('\n').map((l) => l.trim()).filter(Boolean);
 
     let cron = `${minutes} ${hours} * * *`;
     let type = undefined;
@@ -2863,6 +3558,7 @@ async function handleSaveSchedule(e) {
         cron,
         attendanceType: mode,
         message,
+        messagePool,
         emoji,
         targetMessageId,
         maxJitterMinutes: jitter,
@@ -2888,7 +3584,11 @@ async function handleSaveSchedule(e) {
         }
 
         if (res.ok) {
+            const saved = await res.json().catch(() => ({}));
             closeScheduleModal();
+            if (saved && saved.conflicts && saved.conflicts.hasConflict) {
+                showNotificationToast(`Saved — but ${saved.conflicts.conflicts.length} schedule clash(es) detected (≤5m apart).`, 'warning');
+            }
             await fetchConfig();
             await fetchStatus();
         } else {
@@ -3019,9 +3719,70 @@ async function triggerScheduleNow(serverId, scheduleId, btnElement) {
     }
 }
 
+// --- DRY-RUN PREVIEW (read-only render, sends nothing) ---
+function closePreviewModal() {
+    const modal = document.getElementById('previewModal');
+    if (!modal) return;
+    modal.classList.add('hidden');
+    modal.classList.remove('flex');
+}
+
+async function previewScheduleNow(serverId, scheduleId) {
+    const modal = document.getElementById('previewModal');
+    const body = document.getElementById('previewModalBody');
+    if (modal) {
+        modal.classList.remove('hidden');
+        modal.classList.add('flex');
+    }
+    if (body) body.innerHTML = '<p class="text-discord-muted">Loading preview...</p>';
+
+    try {
+        const res = await fetch(`/api/servers/${encodeURIComponent(serverId)}/schedules/${encodeURIComponent(scheduleId)}/preview`);
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+            throw new Error((data && data.error) || `HTTP ${res.status}`);
+        }
+        const p = data.preview;
+        const rows = [
+            ['Server', `${escapeHtml(p.serverName)} <span class="text-discord-muted">(${escapeHtml(p.channelId)})</span>`],
+            ['Schedule', escapeHtml(p.scheduleLabel)],
+            ['Cron', `<span class="mono">${escapeHtml(p.cron)}</span>${p.nextFire ? ` <span class="text-discord-muted">(next: ${escapeHtml(new Date(p.nextFire).toLocaleString())})</span>` : ''}`],
+            ['Mode', escapeHtml(p.attendanceType) + (p.active ? '' : ' <span class="text-amber-300">[PAUSED]</span>')],
+        ];
+        let html = rows.map(([k, v]) => `
+            <div class="flex items-start gap-2 px-3 py-2 rounded-lg bg-discord-card/60 border border-discord-border/60">
+                <span class="text-discord-muted w-20 shrink-0 font-semibold uppercase text-[10px] pt-0.5">${k}</span>
+                <span class="text-white flex-1">${v}</span>
+            </div>`).join('');
+
+        if (p.attendanceType === 'REACTION') {
+            html += `
+            <div class="px-3 py-2 rounded-lg bg-discord-card/60 border border-discord-border/60">
+                <p class="text-discord-muted text-[10px] uppercase font-semibold mb-1">Reaction</p>
+                <p class="text-white text-sm">${escapeHtml(p.emoji)} <span class="text-discord-muted">on ${escapeHtml(p.targetMessageId)}</span></p>
+            </div>`;
+        } else {
+            html += `
+            <div class="px-3 py-2 rounded-lg bg-discord-card/60 border border-discord-border/60">
+                <p class="text-discord-muted text-[10px] uppercase font-semibold mb-1">Resolved message</p>
+                <p class="text-white text-sm whitespace-pre-wrap">"${escapeHtml(p.resolvedBase)}"</p>
+            </div>`;
+            if (p.pool && p.pool.length > 0) {
+                html += `<div class="px-3 py-2 rounded-lg bg-discord-card/60 border border-discord-border/60">
+                    <p class="text-discord-muted text-[10px] uppercase font-semibold mb-1">Variants (${p.pool.length}, random pick at runtime)</p>` +
+                    p.resolvedPool.map((m, i) => `<p class="text-white text-sm">[${i + 1}] "${escapeHtml(m)}"</p>`).join('') +
+                    `</div>`;
+            }
+        }
+        if (body) body.innerHTML = html;
+    } catch (err) {
+        if (body) body.innerHTML = `<p class="text-rose-400">Preview failed: ${escapeHtml(err.message)}</p>`;
+    }
+}
+
 // --- THEME MANAGEMENT (DARK / LIGHT MODE) ---
 function initTheme() {
-    const savedTheme = localStorage.getItem('attendancebot_theme') || 'dark';
+    const savedTheme = localStorage.getItem('croncord_theme') || 'dark';
     applyTheme(savedTheme, false);
 }
 
@@ -3029,7 +3790,7 @@ function applyTheme(theme, persist = true) {
     currentTheme = theme;
     if (persist) {
         try {
-            localStorage.setItem('attendancebot_theme', theme);
+            localStorage.setItem('croncord_theme', theme);
         } catch (e) {}
     }
 
@@ -3321,7 +4082,7 @@ function exportLogsToCsv() {
     link.href = url;
 
     const timestamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
-    link.download = `attendancebot-session-logs-${timestamp}.csv`;
+    link.download = `croncord-session-logs-${timestamp}.csv`;
     document.body.appendChild(link);
     link.click();
 
@@ -3402,7 +4163,7 @@ function initCliTerminalShortcuts() {
 function initCliTerminalSkin() {
     const win = document.getElementById('cliTerminalWindow');
     if (!win) return;
-    const savedSkin = localStorage.getItem('attendancebot_terminal_skin');
+    const savedSkin = localStorage.getItem('croncord_terminal_skin');
     if (savedSkin === 'dark') {
         win.classList.add('force-dark-terminal');
     } else if (savedSkin === 'light') {
@@ -3416,11 +4177,11 @@ function toggleCliTerminalSkin() {
     const isForcedDark = win.classList.contains('force-dark-terminal');
     if (isForcedDark) {
         win.classList.remove('force-dark-terminal');
-        localStorage.setItem('attendancebot_terminal_skin', 'light');
+        localStorage.setItem('croncord_terminal_skin', 'light');
         showNotificationToast('Terminal switched to light appearance', 'info');
     } else {
         win.classList.add('force-dark-terminal');
-        localStorage.setItem('attendancebot_terminal_skin', 'dark');
+        localStorage.setItem('croncord_terminal_skin', 'dark');
         showNotificationToast('Terminal switched to dark appearance', 'info');
     }
 }
@@ -3443,7 +4204,7 @@ function addCommandToHistory(cmd) {
     }
 
     try {
-        localStorage.setItem('attendancebot_cli_history', JSON.stringify(cliCommandHistory));
+        localStorage.setItem('croncord_cli_history', JSON.stringify(cliCommandHistory));
     } catch (e) {}
 
     renderCliHistoryDropup();
@@ -3492,7 +4253,7 @@ async function executeCliCommand(commandLine) {
     const cmdEl = document.createElement('div');
     cmdEl.className = 'cli-cmd-line mt-2 pt-1 border-t border-zinc-800/80 flex items-start gap-1.5';
     cmdEl.innerHTML = `
-        <span class="cli-prompt text-emerald-400 font-bold select-none">attendancebot:~$</span>
+        <span class="cli-prompt text-emerald-400 font-bold select-none">croncord:~$</span>
         <span class="cli-cmd-text font-semibold">${escapeHtml(commandLine)}</span>
     `;
     terminalOutput.appendChild(cmdEl);
@@ -3642,6 +4403,13 @@ const CLI_COMMANDS_REFERENCE = [
         autoRun: false
     },
     {
+        cmd: 'server ignore-holidays <id> on|off',
+        template: 'server ignore-holidays 1 off',
+        category: 'Servers',
+        desc: 'Opt a server out of (or back into) holiday skip dates (v3.9)',
+        autoRun: false
+    },
+    {
         cmd: 'server delete <id|name>',
         template: 'server delete 1',
         category: 'Servers',
@@ -3693,6 +4461,110 @@ const CLI_COMMANDS_REFERENCE = [
         template: 'schedule reorder 1 2,1',
         category: 'Schedules',
         desc: 'Update priority execution sequence for server routines',
+        autoRun: false
+    },
+    {
+        cmd: 'schedule conflicts <srvId>',
+        template: 'schedule conflicts 1',
+        category: 'Schedules',
+        desc: 'Show ≤5-minute clash warnings between routines (v3.9)',
+        autoRun: true
+    },
+    {
+        cmd: 'schedule pool <srvId> <schedId> [set|clear]',
+        template: 'schedule pool 1 1',
+        category: 'Schedules',
+        desc: 'View or set rotating message variants for a routine (v3.9)',
+        autoRun: false
+    },
+    {
+        cmd: 'schedule enable-all <srvId>',
+        template: 'schedule enable-all 1',
+        category: 'Schedules',
+        desc: 'Enable every routine on a server at once',
+        autoRun: false
+    },
+    {
+        cmd: 'schedule disable-all <srvId>',
+        template: 'schedule disable-all 1',
+        category: 'Schedules',
+        desc: 'Pause every routine on a server at once',
+        autoRun: false
+    },
+    {
+        cmd: 'server clone <id> <name> <chanId>',
+        template: 'server clone 1 "Copy" 1234567890123456789',
+        category: 'Servers',
+        desc: 'Duplicate a server profile with fresh schedule IDs',
+        autoRun: false
+    },
+    {
+        cmd: 'preview <serverId> [scheduleId]',
+        template: 'preview 1',
+        category: 'Actions',
+        desc: 'Dry-run: show resolved post text without sending anything',
+        autoRun: true
+    },
+    {
+        cmd: 'upcoming [count]',
+        template: 'upcoming 10',
+        category: 'Planning',
+        desc: 'Preview next scheduled fire times across servers (v3.9)',
+        autoRun: true
+    },
+    {
+        cmd: 'quiet [HH:MM HH:MM|clear]',
+        template: 'quiet 22:00 07:00',
+        category: 'Planning',
+        desc: 'View, set, or clear the global quiet-hours window (v3.9)',
+        autoRun: false
+    },
+    {
+        cmd: 'holiday list|add|remove',
+        template: 'holiday add 2026-12-25 "Christmas Day"',
+        category: 'Planning',
+        desc: 'Manage named intentional skip dates (v3.9)',
+        autoRun: false
+    },
+    {
+        cmd: 'vacation [date] [note]|off',
+        template: 'vacation 2026-12-20 "Trip"',
+        category: 'Planning',
+        desc: 'Pause everything until a date, auto-resumes after',
+        autoRun: false
+    },
+    {
+        cmd: 'calendar [YYYY-MM]',
+        template: 'calendar 2026-10',
+        category: 'Planning',
+        desc: 'Monthly firing calendar with marked days',
+        autoRun: true
+    },
+    {
+        cmd: 'heartbeat [url] [mins]|test|off',
+        template: 'heartbeat https://hc-ping.com/abc 15',
+        category: 'Planning',
+        desc: 'External monitor pings for silent-outage alerts',
+        autoRun: false
+    },
+    {
+        cmd: 'digest [on|off|test]',
+        template: 'digest test',
+        category: 'Planning',
+        desc: 'Weekly webhook stats summary: configure or send now',
+        autoRun: false
+    },
+    {
+        cmd: 'backups',
+        category: 'Config',
+        desc: 'List automatic config restore points (v3.9)',
+        autoRun: true
+    },
+    {
+        cmd: 'restore <file>',
+        template: 'restore ',
+        category: 'Config',
+        desc: 'Roll back to a restore-point snapshot (v3.9)',
         autoRun: false
     },
     {
@@ -3944,7 +4816,7 @@ function insertCliHelpCommand(cmd, autoRun = false) {
 
 function initCliHistory() {
     try {
-        const stored = localStorage.getItem('attendancebot_cli_history');
+        const stored = localStorage.getItem('croncord_cli_history');
         if (stored) {
             const parsed = JSON.parse(stored);
             if (Array.isArray(parsed) && parsed.length > 0) {
@@ -3955,7 +4827,7 @@ function initCliHistory() {
         } else {
             cliCommandHistory = ['status', 'list'];
             try {
-                localStorage.setItem('attendancebot_cli_history', JSON.stringify(cliCommandHistory));
+                localStorage.setItem('croncord_cli_history', JSON.stringify(cliCommandHistory));
             } catch (e) {}
         }
     } catch (e) {
@@ -4130,7 +5002,7 @@ function removeCliHistoryItem(cmd, event) {
     if (idx !== -1) {
         cliCommandHistory.splice(idx, 1);
         try {
-            localStorage.setItem('attendancebot_cli_history', JSON.stringify(cliCommandHistory));
+            localStorage.setItem('croncord_cli_history', JSON.stringify(cliCommandHistory));
         } catch (e) {}
         renderCliHistoryDropup();
         showNotificationToast(`Removed "${cmd}" from history`, 'info');
@@ -4145,7 +5017,7 @@ function clearCliHistory(event) {
     cliCommandHistory = [];
     cliHistoryIndex = -1;
     try {
-        localStorage.removeItem('attendancebot_cli_history');
+        localStorage.removeItem('croncord_cli_history');
     } catch (e) {}
     renderCliHistoryDropup();
     showNotificationToast('Command history cleared', 'info');
