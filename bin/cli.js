@@ -484,12 +484,12 @@ async function viewWebServerLogs() {
 function printHeader(isOnline = false, statusData = null) {
     console.clear();
     console.log(`
- ██████╗ ███████╗ ███████╗███╗   ██╗ ██████╗ ███████╗ ███████╗██████╗ 
-██╔════╝██╔═══██╗██╔═══██╗████╗  ██║██╔════╝██╔═══██╗██╔═══██╗██╔══██╗
-██║     ████████║██║   ██║██╔██╗ ██║██║     ██║   ██║████████║██║  ██║
-██║     ██╔══██║ ██║   ██║██║╚██╗██║██║     ██║   ██║██╔══██║ ██║  ██║
-╚██████╗██║  ██║ ██║   ██║██║ ╚████║╚██████╗██║   ██║██║  ██║ ██████╔╝
- ╚═════╝╚═╝  ╚═╝  ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝ ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ 
+██████╗ ██████╗  ██████╗ ███╗   ██╗██████╗ ██████╗ ██████╗ ██████╗ 
+██╔════╝██╔══██╗██╔═══██╗████╗  ██║██╔════╝██╔═══██╗██╔══██╗██╔══██╗
+██║     ██████╔╝██║   ██║██╔██╗ ██║██║     ██║   ██║██████╔╝██║  ██║
+██║     ██╔══██╗██║   ██║██║╚██╗██║██║     ██║   ██║██╔══██╗██║  ██║
+╚██████╗██║  ██║╚██████╔╝██║ ╚████║╚██████╗╚██████╔╝██║  ██║██████╔╝
+ ╚═════╝╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚═════╝ 
   `);
     console.log(`📆 Croncord Management Hub • ${DISPLAY_VERSION}`);
     console.log('💡 Dual Interface: Interactive Terminal CLI & Web Dashboard');
@@ -1829,11 +1829,65 @@ async function mainMenu() {
  */
 async function promptStartupMode() {
     console.clear();
-    console.log(`
-╔══════════════════════════════════════════════════════════════════════════════╗
-║               ⚡ Welcome to Croncord Management Hub (${DISPLAY_VERSION})            ║
-║                  Dual Interface: Interactive CLI & Web Dashboard             ║
-╚══════════════════════════════════════════════════════════════════════════════╝
+    const clockLines = [
+  "     .--------.    ",
+  "   .-'   ||   '-.  ",
+  "  /      ||      \\ ",
+  " |   \\   ||   /   |",
+  " |    \\  ||  /    |",
+  " |=====( * )======|",
+  " |      / \\       |",
+  "  \\    /   \\     / ",
+  "   '-.       .-'   ",
+  "     '--------'    "
+];
+
+const bannerLines = [
+  "██████╗ ██████╗  ██████╗ ███╗   ██╗██████╗ ██████╗ ██████╗ ██████╗ ",
+  "██╔════╝██╔══██╗██╔═══██╗████╗  ██║██╔════╝██╔═══██╗██╔══██╗██╔══██╗",
+  "██║     ██████╔╝██║   ██║██╔██╗ ██║██║     ██║   ██║██████╔╝██║  ██║",
+  "██║     ██╔══██╗██║   ██║██║╚██╗██║██║     ██║   ██║██╔══██╗██║  ██║",
+  "╚██████╗██║  ██║╚██████╔╝██║ ╚████║╚██████╗╚██████╔╝██║  ██║██████╔╝",
+  " ╚═════╝╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚═════╝ "
+];
+
+// Combine side-by-side with vertical centering offset
+const combinedLogo = [];
+const offset = Math.floor((clockLines.length - bannerLines.length) / 2);
+
+for (let i = 0; i < clockLines.length; i++) {
+  const left = clockLines[i];
+  const bannerIndex = i - offset;
+  const right = (bannerIndex >= 0 && bannerIndex < bannerLines.length)
+    ? bannerLines[bannerIndex]
+    : "";
+  
+  combinedLogo.push(`${left}   ${right}`);
+}
+
+const logoAndBanner = combinedLogo.join("\n");
+
+const title = `⚡ Welcome to Croncord Management Hub (${DISPLAY_VERSION})`;
+const subtitle = `Dual Interface: Interactive CLI & Web Dashboard`;
+
+// Dynamic box calculation
+const innerWidth = Math.max(title.length, subtitle.length) + 4;
+const border = '═'.repeat(innerWidth);
+
+const pad = (str) => {
+  const totalPadding = innerWidth - str.length;
+  const left = Math.floor(totalPadding / 2);
+  const right = totalPadding - left;
+  return ' '.repeat(left) + str + ' '.repeat(right);
+};
+
+// Render full CLI layout
+console.log(logoAndBanner);
+console.log(`
+╔${border}╗
+║${pad(title)}║
+║${pad(subtitle)}║
+╚${border}╝
 `);
     console.log('How would you like to manage Croncord today?\n');
     const startupEnv = detectEnvironment();
