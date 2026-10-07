@@ -1,6 +1,6 @@
 {
     "name": "croncord",
-    "version": "4.1.0",
+    "version": "4.2.0",
     "description": "Multi-server Discord daily attendance background daemon and web management dashboard",
     "main": "src/bot.js",
     "bin": {

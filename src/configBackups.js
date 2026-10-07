@@ -98,13 +98,19 @@ function prune() {
 
 /**
  * Reads a snapshot back (parsed). Throws on missing/invalid file.
+ * The filename is strictly whitelisted to the snapshot shape
+ * (config-YYYY-MM-DD-HH-mm-ss.json) so restore can never escape
+ * the backups directory (no slashes, no parent refs).
  */
 function readBackup(file) {
     const safe = String(file || '').trim();
-    if (!/^config-.*\.json$/.test(safe)) {
+    if (!/^config-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}\.json$/.test(safe)) {
         throw new Error(`Refusing to read unexpected backup name "${file}".`);
     }
     const full = path.join(BACKUP_DIR, safe);
+    if (path.dirname(full) !== BACKUP_DIR) {
+        throw new Error(`Refusing to read backup outside snapshots directory.`);
+    }
     if (!fs.existsSync(full)) {
         throw new Error(`Restore point "${file}" not found.`);
     }

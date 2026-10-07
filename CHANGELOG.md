@@ -6,6 +6,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [4.2.0] - 2026-10-07
+
+### Added
+- **🔥 Success Streaks:** per-server `currentStreak`/`bestStreak` in health data (SKIPPED bridged, FAILED breaks); dashboard fire badges with best-streak tooltips; `uptime` streak lines. Makes the documented streak counters real.
+- **🧬 Schedule Duplicate:** `schedule duplicate|copy <srv> <schedId>`, `POST /api/servers/:id/schedules/:scid/duplicate`, dashboard clone button with clash toast. Copies start paused with conflict analysis attached.
+- **🏖️ Vacation Visibility:** armed vacations shown in `status` output and as a dashboard header badge.
+
+### Fixed
+- **🔒 Restore path traversal:** `readBackup` now whitelists the exact snapshot filename shape plus a directory-containment check — crafted names can never escape `backups/`.
+- **🛡️ API input hardening:** safe-string coercion on all JSON mutation endpoints (servers, schedules, config) — non-string payloads no longer throw on `.trim()`.
+- **🩹 Daemon reconnect:** no repeat give-up errors once already `ERROR`.
+- Standalone daemon (`src/bot.js`) honors global holidays/quiet hours; CLI `import` preserves quiet/holidays/vacation/heartbeat/digest; dashboard widgets refresh on every config fetch.
+
+---
+
 ## [4.1.0] - 2026-10-07
 
 ### Added

@@ -11,14 +11,14 @@ A self-hosted Discord message scheduling daemon.
  ╚═════╝╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚═════╝ 
 ```
 
-> **Croncord v4.1.0 by IamAdedo, dlazyHNTR** \
+> **Croncord v4.2.0 by IamAdedo, dlazyHNTR** \
 > *Automatically send attendance messages to Discord servers on schedule. Set it once, let it run in the background forever — now with a Web Management Dashboard, upcoming-runs preview, holidays & quiet hours, message pools, auto-restore points, and a self-healing daemon.*
 
 ---
 
 ## 📌 Badges & Metadata
 
-- **Current Version:** `v4.1.0`
+- **Current Version:** `v4.2.0`
 - **Dashboard Port:** `http://localhost:3271` (Primary Base Port — never touches port 3000)
 - **Node.js Requirement:** `18.0.0` or higher
 - **License:** MIT
@@ -78,6 +78,11 @@ You can manage the bot three ways:
 - 🆕 **Message Templates & Pools** — `{date}`, `{time}`, `{day}`, `{server}`, `{channel}` variables resolved at send time, plus per-schedule variant pools with random pick per run (history records exactly what was sent)
 - 🆕 **Holidays & Quiet Hours** — Global named holidays (`holiday add 2026-12-25 "Christmas Day"`) with per-server opt-out, plus daily quiet windows; firings on these are recorded as neutral `SKIPPED` — never failures, never streak-breakers
 - 🆕 **Self-Healing Daemon** — Automatic reconnect with exponential backoff on Discord drops (5 attempts, fully logged); manual `stop` always wins; reconnect state visible in `status` and the dashboard badge
+
+### New in v4.2.0
+- 🆕 **Success Streaks** — Per-server current/best success streaks (SKIPPED bridged, never breaks) in health data, dashboard 🔥 badges, and `uptime` output
+- 🆕 **Schedule Duplicate** — `schedule duplicate <srv> <sched>` (+ API + dashboard clone button): exact copy with fresh ID, starts paused with conflict check
+- 🆕 **Vacation Visibility** — Armed vacations show in `status` and as a dashboard header badge
 
 ### New in v4.1.0
 - 🆕 **CRONCORD Banner** — The CLI heading art now spells CRONCORD in matching block letters with a 📆 masthead
@@ -327,6 +332,7 @@ Removes **both** PM2 services (daemon + web dashboard).
 | `schedule add <srvId> <cron> [msg] [label]` | Add a schedule (warns on conflicts) |
 | `schedule toggle` / `pause` / `resume` | Pause / resume a schedule |
 | `schedule delete <srvId> <schedId>` | Remove a schedule |
+| `schedule duplicate <srvId> <schedId>` | *(New in v4.2)* Copy a routine (starts paused) |
 | `schedule reorder <srvId> <id1,id2,...>` | Reorder execution priority sequence |
 | `schedule move <srvId> <from> <to>` | Move a schedule between positions |
 | `schedule conflicts <srvId>` | *(New in v3.9)* Show ≤5-minute clash warnings |

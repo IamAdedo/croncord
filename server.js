@@ -23,6 +23,15 @@ const HOST = '0.0.0.0';
 
 const cliEngine = new CliEngine({ daemonManager, logger, attendanceHistory });
 
+/**
+ * Safe string coercion for inbound JSON fields: trims when possible,
+ * yields '' for null/undefined instead of throwing on .trim().
+ */
+function str(v) {
+    if (v === undefined || v === null) return '';
+    return String(v);
+}
+
 // Bidirectional hot-sync: Watch config.json for external CLI or editor changes
 const CONFIG_FILE_PATH = path.join(__dirname, 'config.json');
 let configWatchDebounce = null;
@@ -305,8 +314,8 @@ app.post('/api/config', (req, res) => {
     const current = daemonManager.getConfig();
     const { globalToken, globalWebhookUrl, servers, globalQuietHours, globalHolidays } = req.body;
 
-    if (globalToken !== undefined) current.globalToken = globalToken.trim();
-    if (globalWebhookUrl !== undefined) current.globalWebhookUrl = globalWebhookUrl.trim();
+    if (globalToken !== undefined) current.globalToken = str(globalToken).trim();
+    if (globalWebhookUrl !== undefined) current.globalWebhookUrl = str(globalWebhookUrl).trim();
     if (Array.isArray(servers)) current.servers = servers;
 
     if (globalQuietHours !== undefined) {
@@ -503,8 +512,8 @@ app.post('/api/servers', (req, res) => {
     }
 
     const config = daemonManager.getConfig();
-    const cleanChan = channelId.trim();
-    const cleanName = name.trim();
+    const cleanChan = str(channelId).trim();
+    const cleanName = str(name).trim();
 
     // Check for duplicate server profile by channel ID or server name
     const existing = (config.servers || []).find(
@@ -546,9 +555,9 @@ app.put('/api/servers/:serverId', (req, res) => {
         return res.status(404).json({ error: 'Server not found' });
     }
 
-    if (name !== undefined) server.name = name.trim();
-    if (channelId !== undefined) server.channelId = channelId.trim();
-    if (webhookUrl !== undefined) server.webhookUrl = (webhookUrl || '').trim();
+    if (name !== undefined) server.name = str(name).trim();
+    if (channelId !== undefined) server.channelId = str(channelId).trim();
+    if (webhookUrl !== undefined) server.webhookUrl = str(webhookUrl).trim();
     if (active !== undefined) server.active = Boolean(active);
     if (ignoreHolidays !== undefined) server.ignoreHolidays = Boolean(ignoreHolidays);
     if (quietHours !== undefined) {
@@ -655,13 +664,13 @@ app.post('/api/servers/:serverId/schedules', (req, res) => {
 
     const newSchedule = {
         id: Date.now().toString() + Math.floor(Math.random() * 1000),
-        label: label.trim(),
-        cron: cron.trim(),
+        label: str(label).trim(),
+        cron: str(cron).trim(),
         message: message !== undefined ? message : 'Present',
         messagePool: pool,
         attendanceType: (attendanceType || 'MESSAGE').toUpperCase(),
         emoji: emoji || '👍',
-        targetMessageId: targetMessageId ? targetMessageId.trim() : '',
+        targetMessageId: targetMessageId ? str(targetMessageId).trim() : '',
         maxJitterMinutes: Number(maxJitterMinutes) >= 0 ? Number(maxJitterMinutes) : 10,
         active: active !== undefined ? Boolean(active) : true,
     };
@@ -695,8 +704,8 @@ app.put('/api/servers/:serverId/schedules/:scheduleId', (req, res) => {
 
     const { label, cron, message, messagePool, attendanceType, emoji, targetMessageId, maxJitterMinutes, active, type, runDate } = req.body;
 
-    if (label !== undefined) schedule.label = label.trim();
-    if (cron !== undefined) schedule.cron = cron.trim();
+    if (label !== undefined) schedule.label = str(label).trim();
+    if (cron !== undefined) schedule.cron = str(cron).trim();
     if (message !== undefined) schedule.message = message;
     if (messagePool !== undefined) {
         if (messagePool === null) {
@@ -709,7 +718,7 @@ app.put('/api/servers/:serverId/schedules/:scheduleId', (req, res) => {
     }
     if (attendanceType !== undefined) schedule.attendanceType = attendanceType.toUpperCase();
     if (emoji !== undefined) schedule.emoji = emoji;
-    if (targetMessageId !== undefined) schedule.targetMessageId = targetMessageId ? targetMessageId.trim() : '';
+    if (targetMessageId !== undefined) schedule.targetMessageId = targetMessageId ? str(targetMessageId).trim() : '';
     if (maxJitterMinutes !== undefined) schedule.maxJitterMinutes = Number(maxJitterMinutes);
     if (active !== undefined) schedule.active = Boolean(active);
     if (type !== undefined) schedule.type = type;
@@ -718,6 +727,30 @@ app.put('/api/servers/:serverId/schedules/:scheduleId', (req, res) => {
     daemonManager.saveConfig(config);
     logger.info(`[${server.name}] Updated schedule: "${schedule.label}"`);
     res.json({ success: true, schedule, conflicts: withConflictWarnings(server) });
+});
+
+// Duplicate one schedule within a server (fresh ID, starts paused)
+app.post('/api/servers/:serverId/schedules/:scheduleId/duplicate', (req, res) => {
+    const { serverId, scheduleId } = req.params;
+    const config = daemonManager.getConfig();
+    const server = (config.servers || []).find((s) => String(s.id) === String(serverId));
+    if (!server) {
+        return res.status(404).json({ error: 'Server not found' });
+    }
+    const schedule = (server.schedules || []).find((sc) => String(sc.id) === String(scheduleId));
+    if (!schedule) {
+        return res.status(404).json({ error: 'Schedule not found' });
+    }
+    const copy = {
+        ...JSON.parse(JSON.stringify(schedule)),
+        id: Date.now().toString() + Math.floor(Math.random() * 1000),
+        label: `${schedule.label} (copy)`,
+        active: false,
+    };
+    server.schedules.push(copy);
+    daemonManager.saveConfig(config);
+    logger.success(`[${server.name}] Duplicated schedule: "${schedule.label}" → "${copy.label}"`);
+    res.status(201).json({ success: true, schedule: copy, conflicts: withConflictWarnings(server) });
 });
 
 // Delete a Schedule

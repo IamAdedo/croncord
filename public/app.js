@@ -236,6 +236,18 @@ function updateDaemonStatusUI() {
             ? `Reconnecting (${rc.attempts}/${rc.maxAttempts}, retry in ${secs}s)`
             : `Reconnect tried ${rc.attempts}/${rc.maxAttempts}`;
     }
+
+    // Vacation-mode indicator (config-driven, neutral skips)
+    try {
+        const vac = (currentConfig && currentConfig.vacation) || null;
+        if (vac && vac.until) {
+            const t = new Date();
+            const todayKey = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+            if (todayKey <= vac.until) {
+                text.innerText += `  🏖️ Vacation till ${vac.until}`;
+            }
+        }
+    } catch (e) { /* never break the status badge */ }
 }
 
 function updateStats() {
@@ -2751,6 +2763,12 @@ function renderServers() {
                             ` : ''}
                             ${healthPill}
                             ${uptimeBadge}
+                            ${(serverHealth && (serverHealth.currentStreak > 0 || serverHealth.bestStreak > 0)) ? `
+                                <span class="text-xs px-2.5 py-0.5 rounded-full font-bold bg-orange-500/15 text-orange-300 border border-orange-500/30 inline-flex items-center gap-1.5 shadow-xs" title="Consecutive successful check-ins (skips don't break streaks). Best: ${serverHealth.bestStreak}">
+                                    <i class="fa-solid fa-fire text-orange-400 text-xs"></i>
+                                    <span>${serverHealth.currentStreak} streak</span>
+                                </span>
+                            ` : ''}
                         </div>
                         <!-- Server Profile List Row Metadata with Elapsed Check-in Clock -->
                         <div class="flex flex-wrap items-center gap-2.5 text-xs text-discord-muted mt-1 mono">
@@ -2967,6 +2985,9 @@ function renderServers() {
                                             </button>
                                             <button onclick="openEditScheduleModal('${server.id}', '${sched.id}')" title="Edit Schedule" class="p-1.5 rounded bg-discord-card hover:bg-discord-border text-discord-muted hover:text-white transition cursor-pointer">
                                                 <i class="fa-solid fa-pencil"></i>
+                                            </button>
+                                            <button onclick="duplicateScheduleUI('${server.id}', '${sched.id}')" title="Duplicate Schedule (starts paused)" class="p-1.5 rounded bg-discord-card hover:bg-discord-border text-discord-muted hover:text-white transition cursor-pointer">
+                                                <i class="fa-solid fa-clone"></i>
                                             </button>
                                             <button onclick="deleteSchedule('${server.id}', '${sched.id}')" title="Delete Schedule" class="p-1.5 rounded bg-discord-card hover:bg-rose-500/20 text-discord-muted hover:text-rose-400 transition cursor-pointer">
                                                 <i class="fa-solid fa-trash"></i>
@@ -3616,6 +3637,27 @@ async function toggleScheduleActive(serverId, scheduleId) {
         await fetchStatus();
     } catch (err) {
         alert(`Error toggling schedule: ${err.message}`);
+    }
+}
+
+async function duplicateScheduleUI(serverId, scheduleId) {
+    try {
+        const res = await fetch(`/api/servers/${encodeURIComponent(serverId)}/schedules/${encodeURIComponent(scheduleId)}/duplicate`, {
+            method: 'POST',
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+            showNotificationToast(`Duplicated → "${data.schedule.label}" (paused — edit the time, then resume).`, 'success');
+            if (data.conflicts && data.conflicts.hasConflict) {
+                showNotificationToast(`${data.conflicts.conflicts.length} clash(es) detected with the copy (≤5m apart).`, 'warning');
+            }
+            await fetchConfig();
+            await fetchStatus();
+        } else {
+            showNotificationToast(data.error || 'Duplicate failed.', 'danger');
+        }
+    } catch (err) {
+        showNotificationToast(`Error duplicating: ${err.message}`, 'danger');
     }
 }
 
@@ -4454,6 +4496,13 @@ const CLI_COMMANDS_REFERENCE = [
         template: 'schedule delete 1 1',
         category: 'Schedules',
         desc: 'Remove an individual attendance routine from a server',
+        autoRun: false
+    },
+    {
+        cmd: 'schedule duplicate <srvId> <schedId>',
+        template: 'schedule duplicate 1 1',
+        category: 'Schedules',
+        desc: 'Copy a routine with a fresh ID (starts paused)',
         autoRun: false
     },
     {

@@ -211,6 +211,28 @@ class AttendanceHistory {
             const failCount = serverRecords.filter((r) => r.status === 'FAILED').length;
             const skipCount = serverRecords.filter((r) => r.status === 'SKIPPED').length;
 
+            // Streaks: consecutive SUCCESS runs; SKIPPED is neutral (bridged,
+            // never extends, never breaks); the first FAILED ends the current run.
+            let currentStreak = 0;
+            for (let i = serverRecords.length - 1; i >= 0; i--) {
+                const st = serverRecords[i].status;
+                if (st === 'SUCCESS') currentStreak++;
+                else if (st === 'SKIPPED') continue;
+                else break;
+            }
+            let bestStreak = 0;
+            let run = 0;
+            serverRecords.forEach((r) => {
+                if (r.status === 'SUCCESS') {
+                    run++;
+                    if (run > bestStreak) bestStreak = run;
+                } else if (r.status === 'SKIPPED') {
+                    // neutral: bridge without extending
+                } else {
+                    run = 0;
+                }
+            });
+
             healthMap[serverId] = {
                 serverId,
                 serverName: server.name,
@@ -224,6 +246,8 @@ class AttendanceHistory {
                 totalSuccess: successCount,
                 totalFailed: failCount,
                 totalSkipped: skipCount,
+                currentStreak,
+                bestStreak,
                 recentExecutions: serverRecords.slice(-5)
             };
         });

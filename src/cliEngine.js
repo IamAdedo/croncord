@@ -287,6 +287,7 @@ class CliEngine {
                     '  schedule pause <serverId> <schedId>    Pause a specific schedule',
                     '  schedule resume <serverId> <schedId>   Resume a specific schedule',
                     '  schedule delete <serverId> <schedId>   Delete a schedule from a server',
+                    '  schedule duplicate <srvId> <schedId> Duplicate a routine (starts paused)',
                     '  schedule reorder <serverId> <id1,id2>  Reorder schedules by priority',
                     '  schedule move <serverId> <from> <to>   Move schedule between positions',
                     '  schedule enable-all <serverId>        Enable every routine on a server',
@@ -319,6 +320,7 @@ class CliEngine {
             '  schedule list <srvId>                  List all schedules for a server',
             '  schedule toggle <srvId> <schedId>      Pause / Resume a specific schedule',
             '  schedule delete <srvId> <schedId>      Remove schedule from server',
+            '  schedule duplicate <srvId> <schedId>   Copy a routine (starts paused)',
             '  schedule reorder <srvId> <id1,id2>     Reorder schedule priority sequence',
             '  schedule conflicts <srvId>             Show ≤5m clash warnings',
             '  schedule pool <srvId> <schedId>        View/set message variants',
@@ -408,6 +410,12 @@ class CliEngine {
         if (reconnectLine) {
             lines.push(`  Self-Heal        : ${reconnectLine}`);
         }
+        try {
+            const vac = suppression.vacationStatus(config.vacation, new Date());
+            if (vac.active) {
+                lines.push(`  Vacation         : 🏖️ ARMED until ${vac.until}${vac.note ? ` ("${vac.note}")` : ''} — all firings skipped`);
+            }
+        } catch (e) { /* never break status */ }
         lines.push('─────────────────────────────────────────────────────────────');
 
         return { success: true, output: lines.join('\n') };
@@ -973,6 +981,31 @@ class CliEngine {
             };
         }
 
+        if (sub === 'duplicate' || sub === 'copy' || sub === 'dup' || sub === 'clone') {
+            const target = args[1];
+            const schedId = args[2];
+            if (!target || !schedId) {
+                return { success: false, output: '❌ Usage: schedule duplicate <serverId|serverName> <scheduleId>' };
+            }
+            const srv = this.findServer(servers, target);
+            if (!srv) return { success: false, output: `❌ Server "${target}" not found.` };
+            const sc = (srv.schedules || []).find((x) => String(x.id) === String(schedId));
+            if (!sc) return { success: false, output: `❌ Schedule "${schedId}" not found on server "${srv.name}".` };
+            const copy = {
+                ...JSON.parse(JSON.stringify(sc)),
+                id: Date.now().toString() + Math.floor(Math.random() * 1000),
+                label: `${sc.label} (copy)`,
+                active: false,
+            };
+            srv.schedules.push(copy);
+            config.servers = servers;
+            this.saveConfig(config);
+            return {
+                success: true,
+                output: `✅ Duplicated "${sc.label}" → "${copy.label}" on "${srv.name}" (starts PAUSED — edit the time, then resume).\nSchedule ID: ${copy.id} | Cron: ${copy.cron}${this.conflictWarningBlock(srv)}`
+            };
+        }
+
         if (sub === 'enable-all' || sub === 'disable-all') {
             const target = args[1];
             if (!target) return { success: false, output: `❌ Usage: schedule ${sub} <serverId|serverName>` };
@@ -1279,6 +1312,9 @@ class CliEngine {
             lines.push(`  • [${state}] "${s.name}" (Channel: ${s.channelId})`);
             lines.push(`      Uptime / Last Check-in: ${lastSuccess}`);
             lines.push(`      Recent Run Status     : ${h.lastRunStatus || 'None'}`);
+            if ((h.currentStreak || 0) > 0 || (h.bestStreak || 0) > 0) {
+                lines.push(`      Streak                : 🔥 ${h.currentStreak || 0} current (best ${h.bestStreak || 0})`);
+            }
         });
 
         return { success: true, output: lines.join('\n') };
