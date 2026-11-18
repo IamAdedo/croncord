@@ -17,6 +17,30 @@ const { validatePool } = require('./src/messageTemplates');
 
 const app = express();
 
+/**
+ * Validate URL to prevent SSRF attacks.
+ * Only allows http/https and blocks private IP ranges and localhost.
+ */
+function isValidExternalUrl(urlStr) {
+    try {
+        const parsedUrl = new URL(String(urlStr).trim());
+        if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+            return false;
+        }
+        const hostname = parsedUrl.hostname;
+        if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '::') {
+            return false;
+        }
+        // Reject private IP ranges (RFC 1918)
+        if (/^10\./.test(hostname) || /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(hostname) || /^192\.168\./.test(hostname)) {
+            return false;
+        }
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
+
 // Force primary base port to 3271 and prevent conflicts by never using port 3000
 const PRIMARY_BASE_PORT = 3271;
 const PORT = PRIMARY_BASE_PORT;
@@ -198,6 +222,9 @@ app.post('/api/heartbeat', (req, res) => {
     if (!url || typeof url !== 'string') {
         return res.status(400).json({ error: 'Heartbeat "url" is required.' });
     }
+    if (!isValidExternalUrl(url)) {
+        return res.status(400).json({ error: 'Invalid heartbeat URL. Only public http/https URLs are allowed.' });
+    }
     let parsed;
     try {
         parsed = new URL(url.trim());
@@ -316,7 +343,13 @@ app.post('/api/config', (req, res) => {
     const { globalToken, globalWebhookUrl, servers, globalQuietHours, globalHolidays } = req.body;
 
     if (globalToken !== undefined) current.globalToken = str(globalToken).trim();
-    if (globalWebhookUrl !== undefined) current.globalWebhookUrl = str(globalWebhookUrl).trim();
+    if (globalWebhookUrl !== undefined) {
+        const trimmedWebhookUrl = str(globalWebhookUrl).trim();
+        if (trimmedWebhookUrl && !isValidExternalUrl(trimmedWebhookUrl)) {
+            return res.status(400).json({ error: 'Invalid global webhook URL. Only http/https URLs to public addresses are allowed.' });
+        }
+        current.globalWebhookUrl = trimmedWebhookUrl;
+    }
     if (Array.isArray(servers)) current.servers = servers;
 
     if (globalQuietHours !== undefined) {
@@ -516,6 +549,12 @@ app.post('/api/servers', (req, res) => {
     const cleanChan = str(channelId).trim();
     const cleanName = str(name).trim();
 
+    if (webhookUrl !== undefined && webhookUrl !== null && str(webhookUrl).trim() !== '') {
+        if (!isValidExternalUrl(str(webhookUrl))) {
+            return res.status(400).json({ error: 'Invalid webhook URL. Only http/https URLs to public addresses are allowed.' });
+        }
+    }
+
     // Check for duplicate server profile by channel ID or server name
     const existing = (config.servers || []).find(
         (s) => (s.channelId && s.channelId.trim() === cleanChan) ||
@@ -558,7 +597,13 @@ app.put('/api/servers/:serverId', (req, res) => {
 
     if (name !== undefined) server.name = str(name).trim();
     if (channelId !== undefined) server.channelId = str(channelId).trim();
-    if (webhookUrl !== undefined) server.webhookUrl = str(webhookUrl).trim();
+    if (webhookUrl !== undefined) {
+        const trimmedWebhookUrl = str(webhookUrl).trim();
+        if (trimmedWebhookUrl !== '' && !isValidExternalUrl(trimmedWebhookUrl)) {
+            return res.status(400).json({ error: 'Invalid webhook URL. Only http/https URLs to public addresses are allowed.' });
+        }
+        server.webhookUrl = trimmedWebhookUrl;
+    }
     if (active !== undefined) server.active = Boolean(active);
     if (ignoreHolidays !== undefined) server.ignoreHolidays = Boolean(ignoreHolidays);
     if (quietHours !== undefined) {
@@ -1072,6 +1117,9 @@ app.post('/api/test-webhook', async (req, res) => {
     const targetUrl = webhookUrl || daemonManager.getConfig().globalWebhookUrl;
     if (!targetUrl) {
         return res.status(400).json({ success: false, message: 'No webhook URL provided or configured.' });
+    }
+    if (!isValidExternalUrl(targetUrl)) {
+        return res.status(400).json({ success: false, message: 'Invalid webhook URL. Only http/https URLs to public addresses are allowed.' });
     }
 
     logger.info(`Testing Discord Webhook dispatch to: ${targetUrl.substring(0, 40)}...`);

@@ -1326,6 +1326,9 @@ class CliEngine {
             return { success: false, output: '❌ Usage: validate <path/to/config.json>' };
         }
         const resolvedPath = path.resolve(process.cwd(), filePath);
+        if (!resolvedPath.startsWith(process.cwd() + path.sep) && resolvedPath !== process.cwd()) {
+            return { success: false, output: '❌ Access denied: file path must be within current directory.' };
+        }
         if (!fs.existsSync(resolvedPath)) {
             return { success: false, output: `❌ File not found: ${filePath}` };
         }
@@ -1362,6 +1365,9 @@ class CliEngine {
             return { success: false, output: '❌ Usage: import <path/to/config.json> [merge|replace]' };
         }
         const resolvedPath = path.resolve(process.cwd(), filePath);
+        if (!resolvedPath.startsWith(process.cwd() + path.sep) && resolvedPath !== process.cwd()) {
+            return { success: false, output: '❌ Access denied: file path must be within current directory.' };
+        }
         if (!fs.existsSync(resolvedPath)) {
             return { success: false, output: `❌ File not found: ${filePath}` };
         }
@@ -1844,7 +1850,11 @@ class CliEngine {
         }
         if (sub === 'logs') {
             const lines = args[1] || '20';
-            const out = await runExec(`npx pm2 logs croncord-daemon --lines ${lines} --nostream`);
+            const linesNum = parseInt(lines, 10);
+            if (isNaN(linesNum) || linesNum < 1 || linesNum > 1000) {
+                return { success: false, output: '❌ Invalid log count. Must be a number between 1 and 1000.' };
+            }
+            const out = await runExec(`npx pm2 logs croncord-daemon --lines ${linesNum} --nostream`);
             return { success: true, output: out || 'No PM2 logs available.' };
         }
         return {
