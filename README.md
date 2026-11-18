@@ -11,14 +11,14 @@ A self-hosted Discord message scheduling daemon.
  ╚═════╝╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚═════╝ 
 ```
 
-> **Croncord v4.2.0 by IamAdedo, dlazyHNTR** \
+> **Croncord v4.2.1 by IamAdedo, dlazyHNTR** \
 > *Automatically send attendance messages to Discord servers on schedule. Set it once, let it run in the background forever — now with a Web Management Dashboard, upcoming-runs preview, holidays & quiet hours, message pools, auto-restore points, and a self-healing daemon.*
 
 ---
 
 ## 📌 Badges & Metadata
 
-- **Current Version:** `v4.2.0`
+- **Current Version:** `v4.2.1`
 - **Dashboard Port:** `http://localhost:3271` (Primary Base Port — never touches port 3000)
 - **Node.js Requirement:** `18.0.0` or higher
 - **License:** MIT
@@ -79,7 +79,7 @@ You can manage the bot three ways:
 - 🆕 **Holidays & Quiet Hours** — Global named holidays (`holiday add 2026-12-25 "Christmas Day"`) with per-server opt-out, plus daily quiet windows; firings on these are recorded as neutral `SKIPPED` — never failures, never streak-breakers
 - 🆕 **Self-Healing Daemon** — Automatic reconnect with exponential backoff on Discord drops (5 attempts, fully logged); manual `stop` always wins; reconnect state visible in `status` and the dashboard badge
 
-### New in v4.2.0
+### New in v4.2.1
 - 🆕 **Success Streaks** — Per-server current/best success streaks (SKIPPED bridged, never breaks) in health data, dashboard 🔥 badges, and `uptime` output
 - 🆕 **Schedule Duplicate** — `schedule duplicate <srv> <sched>` (+ API + dashboard clone button): exact copy with fresh ID, starts paused with conflict check
 - 🆕 **Vacation Visibility** — Armed vacations show in `status` and as a dashboard header badge

@@ -6,12 +6,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [4.2.0] - 2026-10-07
+## [4.2.1] - 2026-10-07
 
-### Added
-- **🔥 Success Streaks:** per-server `currentStreak`/`bestStreak` in health data (SKIPPED bridged, FAILED breaks); dashboard fire badges with best-streak tooltips; `uptime` streak lines. Makes the documented streak counters real.
-- **🧬 Schedule Duplicate:** `schedule duplicate|copy <srv> <schedId>`, `POST /api/servers/:id/schedules/:scid/duplicate`, dashboard clone button with clash toast. Copies start paused with conflict analysis attached.
-- **🏖️ Vacation Visibility:** armed vacations shown in `status` output and as a dashboard header badge.
+### 🔒 Security Fixes
+- **SSRF protection:** `/api/test-webhook`, `/api/heartbeat`, and `/api/servers` webhook URL inputs now validate against public http(s) URLs only — private IP ranges (RFC 1918) and localhost are rejected.
+- **CLI command injection:** `schedule logs <count>` now validates count is an integer between 1 and 1000 before shell execution.
+- **Path traversal protection:** `validate` and `import` commands now reject file paths outside the current working directory.
+- **Cron validation:** CLI `schedule add` and API `POST /api/servers/:serverId/schedules` / `PUT /api/servers/:serverId/schedules/:scheduleId` now validate cron expressions with `cron.validate()` before saving.
+- **XSS remediation:** All `alert()` calls replaced with `showNotificationToast()` which uses `escapeHtml()` for safe rendering. All `innerHTML` assignments sanitize user data through `escapeHtml()`.
+
+### Changed
+- **CLI & API:** Invalid cron expressions now return HTTP 400 instead of being saved silently.
+- **CLI:** Invalid log counts return an error message instead of executing arbitrary shell input.
+
+---
 
 ### Fixed
 - **🔒 Restore path traversal:** `readBackup` now whitelists the exact snapshot filename shape plus a directory-containment check — crafted names can never escape `backups/`.
