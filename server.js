@@ -10,6 +10,7 @@ const { VERSION, DISPLAY_VERSION } = require('./src/version');
 const { validateConfigSchema } = require('./src/schemaValidator');
 const { analyzeServerScheduleConflicts } = require('./src/scheduleConflicts');
 const { getUpcomingRuns } = require('./src/upcoming');
+const cronModule = require('node-cron');
 const configBackups = require('./src/configBackups');
 const suppression = require('./src/suppression');
 const { validatePool } = require('./src/messageTemplates');
@@ -648,6 +649,9 @@ app.post('/api/servers/:serverId/schedules', (req, res) => {
     if (!cron || !label) {
         return res.status(400).json({ error: 'Label and cron expression are required' });
     }
+    if (!cronModule.validate(str(cron).trim())) {
+        return res.status(400).json({ error: `Invalid cron expression: "${str(cron).trim()}"` });
+    }
 
     const config = daemonManager.getConfig();
     const server = config.servers.find((s) => String(s.id) === String(serverId));
@@ -705,7 +709,13 @@ app.put('/api/servers/:serverId/schedules/:scheduleId', (req, res) => {
     const { label, cron, message, messagePool, attendanceType, emoji, targetMessageId, maxJitterMinutes, active, type, runDate } = req.body;
 
     if (label !== undefined) schedule.label = str(label).trim();
-    if (cron !== undefined) schedule.cron = str(cron).trim();
+    if (cron !== undefined) {
+        const trimmedCron = str(cron).trim();
+        if (!cronModule.validate(trimmedCron)) {
+            return res.status(400).json({ error: `Invalid cron expression: "${trimmedCron}"` });
+        }
+        schedule.cron = trimmedCron;
+    }
     if (message !== undefined) schedule.message = message;
     if (messagePool !== undefined) {
         if (messagePool === null) {
