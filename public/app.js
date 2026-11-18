@@ -852,12 +852,12 @@ async function toggleDaemon() {
             const res = await fetch('/api/daemon/start', { method: 'POST' });
             const data = await res.json();
             if (!data.success && data.message) {
-                alert(`Cannot start daemon: ${data.message}`);
+                showNotificationToast(`Cannot start daemon: ${escapeHtml(data.message)}`, 'danger');
             }
         }
         await fetchStatus();
     } catch (err) {
-        alert(`Daemon action failed: ${err.message}`);
+        showNotificationToast(`Daemon action failed: ${escapeHtml(err.message)}`, 'danger');
     } finally {
         isStartingOrStopping = false;
     }
@@ -897,17 +897,16 @@ async function saveCredentialsSettings() {
             await fetchConfig();
             await fetchStatus();
         } else {
-            alert('Failed to save configuration');
+            showNotificationToast('Failed to save configuration', 'danger');
         }
     } catch (err) {
-        alert(`Error saving credentials: ${err.message}`);
-    }
+        showNotificationToast(`Error saving credentials: ${escapeHtml(err.message)}`, 'danger');
 }
 
 async function testGlobalWebhook() {
     const webhook = document.getElementById('inputGlobalWebhook').value;
     if (!webhook || !webhook.trim()) {
-        alert('Please enter a Discord Webhook URL first.');
+        showNotificationToast('Please enter a Discord Webhook URL first.', 'warning');
         return;
     }
 
@@ -919,12 +918,12 @@ async function testGlobalWebhook() {
         });
         const data = await res.json();
         if (data.success) {
-            alert('✅ Webhook test passed! Notification was sent to Discord.');
+            showNotificationToast('✅ Webhook test posted! Notification was sent to Discord.', 'success');
         } else {
-            alert(`❌ Webhook test failed: ${data.message || 'Check URL'}`);
+            showNotificationToast(`❌ Webhook test failed: ${escapeHtml(data.message || 'Check URL')}`, 'danger');
         }
     } catch (err) {
-        alert(`Webhook test error: ${err.message}`);
+        showNotificationToast(`Webhook test error: ${escapeHtml(err.message)}`, 'danger');
     }
 }
 
@@ -1431,11 +1430,10 @@ async function restoreFromLocalBackup() {
             await fetchStatus();
             showNotificationToast(`Restored ${serverCount} servers from local backup!`, 'success');
         } else {
-            alert(`Failed to restore backup: ${data.error || 'Server error'}`);
+            showNotificationToast(`Failed to restore backup: ${escapeHtml(data.error || 'Server error')}`, 'danger');
         }
     } catch (err) {
-        alert(`Error restoring backup: ${err.message}`);
-    }
+        showNotificationToast(`Error restoring backup: ${escapeHtml(err.message)}`, 'danger');
 }
 
 // --- BROWSER NOTIFICATIONS & LOCAL SYSTEM ALERTS ---
@@ -1490,7 +1488,7 @@ function updateNotificationButtonUI() {
 
 async function toggleDesktopNotifications() {
     if (!('Notification' in window)) {
-        alert('Desktop notifications are not supported in this browser.');
+        showNotificationToast('Desktop notifications are not supported in this browser.', 'warning');
         return;
     }
 
@@ -1526,7 +1524,7 @@ async function toggleDesktopNotifications() {
             showNotificationToast('Desktop alerts paused.', 'info');
         }
     } else if (Notification.permission === 'denied') {
-        alert('Notification permission is blocked in your browser settings. To enable local system alerts, please permit notifications for this origin in your browser settings or URL bar lock icon.');
+        showNotificationToast('Notification permission is blocked in your browser settings. To enable local system alerts, please permit notifications for this origin in your browser settings or URL bar lock icon.', 'warning');
     }
 
     updateNotificationButtonUI();
@@ -2055,10 +2053,10 @@ async function bulkSetServersActive(active) {
             await fetchStatus();
             clearServerSelection();
         } else {
-            alert(`Bulk action failed: ${data.error || 'Unknown error'}`);
+            showNotificationToast(`Bulk action failed: ${escapeHtml(data.error || 'Unknown error')}`, 'danger');
         }
     } catch (err) {
-        alert(`Error executing bulk action: ${err.message}`);
+        showNotificationToast(`Error executing bulk action: ${escapeHtml(err.message)}`, 'danger');
     }
 }
 
@@ -2116,7 +2114,7 @@ async function bulkDeleteSelectedServers() {
 async function toggleAllServers(active) {
     const allServers = currentConfig.servers || [];
     if (allServers.length === 0) {
-        alert('No configured servers found to toggle.');
+        showNotificationToast('No server profiles found to toggle.', 'warning');
         return;
     }
 
@@ -2138,10 +2136,10 @@ async function toggleAllServers(active) {
             renderServers();
             updateStats();
         } else {
-            alert(`Failed to update servers: ${data.error || 'Unknown error'}`);
+            showNotificationToast(`Failed to update servers: ${escapeHtml(data.error || 'Unknown error')}`, 'danger');
         }
     } catch (err) {
-        alert(`Error toggling servers: ${err.message}`);
+        showNotificationToast(`Error toggling servers: ${escapeHtml(err.message)}`, 'danger');
     }
 }
 
@@ -2149,7 +2147,7 @@ async function toggleAllServers(active) {
 function exportConfigJSON() {
     const servers = currentConfig.servers || [];
     if (servers.length === 0) {
-        alert('There are no server profiles configured to export.');
+        showNotificationToast('There are no server profiles configured to export.', 'warning');
         return;
     }
 
@@ -3621,11 +3619,10 @@ async function handleSaveSchedule(e) {
             await fetchStatus();
         } else {
             const err = await res.json();
-            alert(`Failed to save schedule: ${err.error || 'Unknown error'}`);
+            showNotificationToast(`Failed to save schedule: ${escapeHtml(err.error || 'Unknown error')}`, 'danger');
         }
     } catch (err) {
-        alert(`Error saving schedule: ${err.message}`);
-    }
+        showNotificationToast(`Error saving schedule: ${escapeHtml(err.message)}`, 'danger');
 }
 
 async function toggleScheduleActive(serverId, scheduleId) {
@@ -3643,8 +3640,9 @@ async function toggleScheduleActive(serverId, scheduleId) {
         await fetchConfig();
         await fetchStatus();
     } catch (err) {
-        alert(`Error toggling schedule: ${err.message}`);
+        showNotificationToast(`Error toggling schedule: ${escapeHtml(err.message)}`, 'danger');
     }
+}
 }
 
 async function duplicateScheduleUI(serverId, scheduleId) {
