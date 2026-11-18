@@ -6,7 +6,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [4.2.1] - 2026-10-07
+## [4.2.1] - 2026-11-18
 
 ### 🔒 Security Fixes
 - **SSRF protection:** `/api/test-webhook`, `/api/heartbeat`, and `/api/servers` webhook URL inputs now validate against public http(s) URLs only — private IP ranges (RFC 1918) and localhost are rejected.
